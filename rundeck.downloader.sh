@@ -94,9 +94,19 @@ rundeckpro-enterprise-4.14.0-20230615.war
 rundeckpro-enterprise-4.14.1-20230622.war
 rundeckpro-enterprise-4.14.2-20230713.war
 rundeckpro-enterprise-4.15.0-20230725.war
+Add_a_new_version_to_the_list
 Exit"
 
-while true; do
+function add_new_option() {
+    echo -n "Enter a new version name: "
+    read new_option
+    options=$(echo "$options" | sed -i '/^Add_a_new_version_to_the_list/i '"$new_option"'' $0)
+    echo "New option added successfully!"
+    sleep 2
+    $0
+    exit 0
+}
+function display_menu() {
     clear
     echo "Menu:"
     i=1
@@ -104,13 +114,23 @@ while true; do
         echo "$i. $option"
         i=$((i+1))
     done
+}
+
+function is_numeric() {
+    [[ "$1" =~ ^[0-9]+$ ]]
+}
+
+while true; do
+    display_menu
 
     read -p "Enter your choice (1-$((i-1))): " choice
 
-    if [ "$choice" -ge 1 ] && [ "$choice" -lt $i ] 2>/dev/null; then
+    if is_numeric "$choice" && [ "$choice" -ge 1 ] && [ "$choice" -lt $i ] 2>/dev/null; then
         if [ "$choice" -eq $((i-1)) ]; then
             echo "Exiting the script."
             exit 0
+        elif [ "$choice" -eq $((i-2)) ]; then
+            add_new_option
         else
             selected_option=$(echo $options | cut -d " " -f $choice)
             wget https://packagecloud.io/pagerduty/rundeckpro/packages/java/com.rundeck.enterprise/$selected_option/artifacts/$selected_option/download -O $selected_option
