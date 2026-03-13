@@ -16,7 +16,7 @@ Requisites:
     - Python 3.8+
     - requests library: pip3 install requests
     - Terraform
-    - Pagerduty provider >=3.31.3, more info: https://registry.terraform.io/providers/PagerDuty/pagerduty/latest/docs
+    - Pagerduty provider >=3.31.4, more info: https://registry.terraform.io/providers/PagerDuty/pagerduty/latest/docs
     - Run 'terraform init' before running the script
 """
 
@@ -39,7 +39,7 @@ import logging
 # CONFIGURATION
 # ============================================================================
 
-__version__ = "2.1"
+__version__ = "2.2"
 
 # Get the script name dynamically
 SCRIPT_NAME = os.path.basename(sys.argv[0])
@@ -1262,6 +1262,9 @@ def display_resource_menu() -> List[str]:
     """Display interactive menu for resource selection"""
     resource_list = list(RESOURCE_CONFIGS.keys())
     
+    # Sort alphabetically for display
+    sorted_resource_list = sorted(resource_list)
+    
     print("\n" + "="*80)
     print("PagerDuty Resource Selection Menu")
     print("="*80)
@@ -1273,8 +1276,8 @@ def display_resource_menu() -> List[str]:
     print("  - Enter 'q' to quit")
     print("\n" + "-"*80)
     
-    # Display resources
-    for index, resource_key in enumerate(resource_list, 1):
+    # Display resources in alphabetical order
+    for index, resource_key in enumerate(sorted_resource_list, 1):
         print(f"  {index:2d}. {resource_key}")
     
     print("\n" + "-"*80)
@@ -1288,7 +1291,7 @@ def display_resource_menu() -> List[str]:
             sys.exit(0)
         
         if selection == '' or selection == '0':
-            return resource_list
+            return resource_list  # Return original list to maintain dependency order
         
         try:
             selected_indices = set()
@@ -1305,12 +1308,12 @@ def display_resource_menu() -> List[str]:
                     selected_indices.add(int(part))
             
             # Validate indices
-            if any(i < 1 or i > len(resource_list) for i in selected_indices):
-                print(f"Error: Please enter numbers between 1 and {len(resource_list)}")
+            if any(i < 1 or i > len(sorted_resource_list) for i in selected_indices):
+                print(f"Error: Please enter numbers between 1 and {len(sorted_resource_list)}")
                 continue
             
-            # Convert indices to resource keys
-            selected_resources = [resource_list[i - 1] for i in sorted(selected_indices)]
+            # Convert indices to resource keys using the sorted list
+            selected_resources = [sorted_resource_list[i - 1] for i in sorted(selected_indices)]
             
             print(f"\nSelected {len(selected_resources)} resource types")
             return selected_resources
@@ -1318,7 +1321,6 @@ def display_resource_menu() -> List[str]:
         except ValueError:
             print("Error: Invalid input format. Please try again.")
             continue
-
 # ============================================================================
 # IMPORT MODE - MAIN EXECUTION
 # ============================================================================
