@@ -64,15 +64,17 @@ def parse_timezone(tz_str: str) -> tzinfo:
 
 
 class PagerDutyAPI:
-    """PagerDuty REST API v2 client with user caching, rate limiting, and session management[cite: 10]."""
+    """PagerDuty REST API v2 client with built-in rate-limiting and session management[cite: 7].
+
+    Handles default rate limits of $Rate = 250\\text{ req/min}$ with client-side throttling[cite: 7].
+    """
 
     def __init__(self, api_token: str, rate_limit: int = 8):
-        if not api_token or not api_token.strip():
+        if not api_token or api_token.strip() == "":
             raise ValueError("API token cannot be empty")
 
         self.base_url = "https://api.pagerduty.com"
-        self.user_cache: Dict[str, Dict[str, str]] = {}
-        self.min_interval = 1.0 / rate_limit
+        self.min_interval = 1.0 / rate_limit  # Throttling interval in seconds[cite: 7]
         self.last_request = 0.0
 
         self.session = requests.Session()
@@ -81,12 +83,12 @@ class PagerDutyAPI:
                 "Accept": "application/vnd.pagerduty+json;version=2",
                 "Authorization": f"Token token={api_token.strip()}",
                 "Content-Type": "application/json",
-                "User-Agent": f"PagerDutyDevBuddy-ResolvedIncidentsExporter/{__version__}",
+                "User-Agent": f"PagerDutyDevBuddy-IncidentExporter/{__version__}",
             }
         )
 
     def _rate_limit(self) -> None:
-        """Enforces client-side rate limiting ($Rate = 8\\text{ req/s}$)[cite: 10]."""
+        """Enforces client-side rate limiting ($Rate = 8\\text{ req/s}$)[cite: 7]."""
         elapsed = time.time() - self.last_request
         if elapsed < self.min_interval:
             time.sleep(self.min_interval - elapsed)
@@ -95,23 +97,21 @@ class PagerDutyAPI:
     def _request(
         self, url: str, params: Optional[Dict] = None, max_retries: int = 3
     ) -> Optional[requests.Response]:
-        """Makes an HTTP GET request with retry backoff and rate-limit handling[cite: 10]."""
+        """Makes API request with exponential backoff and rate-limit mitigation[cite: 7]."""
         for attempt in range(max_retries):
             try:
                 self._rate_limit()
                 response = self.session.get(url, params=params, timeout=30)
 
                 if response.status_code == 429:
-                    wait = int(response.headers.get("Retry-After", 60))
-                    logger.warning(
-                        f"Rate limited ($Rate = {self.min_interval:.3f}\\text{{s/req}}$). Waiting {wait}s..."
-                    )
-                    time.sleep(wait)
+                    retry_after = int(response.headers.get("Retry-After", 60))
+                    logger.warning(f"Rate limited. Waiting {retry_after}s...")
+                    time.sleep(retry_after)
                     continue
 
                 if response.status_code in (401, 403):
                     logger.error(
-                        f"Authentication failed (HTTP {response.status_code}). Check PAGERDUTY_API_TOKEN permissions."
+                        f"Authentication/Authorization failed (HTTP {response.status_code}). Check token permissions."
                     )
                     sys.exit(1)
 
@@ -121,7 +121,7 @@ class PagerDutyAPI:
             except requests.exceptions.Timeout:
                 if attempt < max_retries - 1:
                     logger.warning(
-                        f"Timeout encountered (attempt {attempt + 1}/{max_retries})"
+                        f"Timeout encountered. Retrying ({attempt + 1}/{max_retries})..."
                     )
                     time.sleep(2**attempt)
                 else:
@@ -131,57 +131,44 @@ class PagerDutyAPI:
             except requests.exceptions.RequestException as e:
                 if attempt < max_retries - 1:
                     logger.warning(
-                        f"Request failed (attempt {attempt + 1}/{max_retries}): {e}"
+                        f"Request failed ({e}). Retrying ({attempt + 1}/{max_retries})..."
                     )
                     time.sleep(2**attempt)
                 else:
-                    logger.error(f"Request failed after {max_retries} attempts: {e}")
+                    logger.error(f"Request failed permanently: {e}")
                     return None
 
         return None
 
-    def get_user_details(self, user_id: str) -> Optional[Dict[str, str]]:
-        """Fetch user details with local memory caching to eliminate duplicate API requests[cite: 10]."""
-        if user_id in self.user_cache:
-            return self.user_cache[user_id]
-
-        response = self._request(f"{self.base_url}/users/{user_id}")
+    def validate_token(self) -> bool:
+        """Validates API token credentials against the `/users` endpoint[cite: 7]."""
+        logger.info("Validating API token...")
+        response = self._request(f"{self.base_url}/users", params={"limit": 1})
         if response and response.status_code == 200:
-            user_data = response.json().get("user", {})
-            self.user_cache[user_id] = {
-                "id": user_data.get("id", ""),
-                "name": user_data.get("name", "Unknown"),
-                "email": user_data.get("email", "N/A"),
-            }
-            return self.user_cache[user_id]
-        return None
+            logger.info("✓ API token validated successfully")
+            return True
+        return False
 
-    def get_resolved_incidents(
-        self, since: Optional[str] = None, until: Optional[str] = None, service_ids: Optional[List[str]] = None
+    def get_incidents(
+        self, since: Optional[str] = None, until: Optional[str] = None
     ) -> List[Dict]:
-        """Fetch resolved incidents using offset pagination and dynamic time windows[cite: 10]."""
-        logger.info(f"Fetching resolved incidents from window: {since or 'Beginning'} -> {until or 'Now'}")
-        if service_ids:
-            logger.info(f"Filtering by service IDs: {', '.join(service_ids)}")
-
+        """Fetches all incidents within specified date range using offset pagination[cite: 7]."""
         incidents = []
         offset = 0
         limit = 100
 
+        logger.info(f"Fetching incidents from window: {since or 'Beginning'} -> {until or 'Now'}")
+
         while True:
             params = {
-                "statuses[]": "resolved",
                 "offset": offset,
                 "limit": limit,
-                "include[]": ["users"],
+                "include[]": ["first_trigger_log_entry"],
             }
-            
             if since:
                 params["since"] = since
             if until:
                 params["until"] = until
-            if service_ids:
-                params["service_ids[]"] = service_ids
 
             response = self._request(f"{self.base_url}/incidents", params=params)
             if not response:
@@ -189,129 +176,78 @@ class PagerDutyAPI:
                 break
 
             data = response.json()
-            fetched_batch = data.get("incidents", [])
+            batch = data.get("incidents", [])
+            incidents.extend(batch)
 
-            for incident in fetched_batch:
-                resolver = None
-                resolver_details = None
-
-                log_params = {"include[]": ["users"], "is_overview": "true"}
-                log_response = self._request(
-                    f"{self.base_url}/incidents/{incident['id']}/log_entries",
-                    params=log_params,
-                )
-
-                if log_response and log_response.status_code == 200:
-                    log_data = log_response.json()
-                    for entry in log_data.get("log_entries", []):
-                        if entry.get("type") == "resolve_log_entry":
-                            resolver = entry.get("agent", {})
-                            if resolver and resolver.get("id"):
-                                resolver_details = self.get_user_details(resolver["id"])
-                            break
-
-                incident_info = {
-                    "incident_id": incident.get("id", "N/A"),
-                    "incident_number": incident.get("incident_number", "N/A"),
-                    "title": incident.get("title", "N/A"),
-                    "created_at": incident.get("created_at", "N/A"),
-                    "resolved_at": incident.get("resolved_at", "N/A"),
-                    "resolver": (
-                        {
-                            "id": resolver.get("id") if resolver else None,
-                            "name": (
-                                resolver_details["name"]
-                                if resolver_details
-                                else resolver.get("summary") if resolver else "Unknown"
-                            ),
-                            "email": (
-                                resolver_details["email"]
-                                if resolver_details
-                                else "Unknown"
-                            ),
-                        }
-                        if resolver
-                        else None
-                    ),
-                    "urgency": incident.get("urgency", "N/A"),
-                    "service": incident.get("service", {}).get("summary", "N/A"),
-                    "service_id": incident.get("service", {}).get("id", "N/A"),
-                }
-
-                incidents.append(incident_info)
-
-                if len(incidents) % 10 == 0:
-                    logger.info(f"Processed {len(incidents)} resolved incidents...")
-
-            if not data.get("more", False):
+            if data.get("more", False):
+                logger.info(f"Fetched {len(incidents)} incidents so far...")
+                offset += limit
+            else:
+                logger.info(f"✓ Completed retrieval: {len(incidents)} total incidents")
                 break
 
-            offset += limit
-
-        logger.info(f"✓ Found total of {len(incidents)} resolved incidents")
         return incidents
 
 
-def format_datetime(dt_str: str) -> str:
-    """Format ISO datetime string to standard UTC display format[cite: 10]."""
-    try:
-        dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
-        return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
-    except Exception:
-        return dt_str
+def extract_incident_data(incidents: List[Dict]) -> List[Dict]:
+    """Extracts and flattens incident records into structured dictionaries[cite: 7]."""
+    results = []
+
+    for incident in incidents:
+        trigger_summary = "N/A"
+        if incident.get("first_trigger_log_entry"):
+            trigger_summary = incident["first_trigger_log_entry"].get("summary", "N/A")
+
+        results.append(
+            {
+                "incident_id": incident.get("id", "N/A"),
+                "incident_number": incident.get("incident_number", "N/A"),
+                "incident_title": incident.get("title", "N/A"),
+                "status": incident.get("status", "N/A"),
+                "urgency": incident.get("urgency", "N/A"),
+                "service": incident.get("service", {}).get("summary", "N/A"),
+                "created_at": incident.get("created_at", "N/A"),
+                "trigger_summary": trigger_summary,
+            }
+        )
+
+    return results
 
 
-def export_to_csv(incidents: List[Dict], filename: str) -> None:
-    """Export resolved incident records to a timestamp-versioned CSV file."""
+def write_csv(data: List[Dict], filename: str) -> str:
+    """Exports dataset to a dynamic, timestamp-versioned CSV file."""
     fieldnames = [
-        "incident_number",
         "incident_id",
-        "title",
-        "created_at",
-        "resolved_at",
-        "resolver_name",
-        "resolver_email",
-        "resolver_id",
-        "service",
-        "service_id",
+        "incident_number",
+        "incident_title",
+        "status",
         "urgency",
+        "service",
+        "created_at",
+        "trigger_summary",
     ]
 
     with open(filename, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        for incident in incidents:
-            resolver = incident.get("resolver") or {}
-            writer.writerow(
-                {
-                    "incident_number": incident.get("incident_number", "N/A"),
-                    "incident_id": incident.get("incident_id", "N/A"),
-                    "title": incident.get("title", "N/A"),
-                    "created_at": format_datetime(incident.get("created_at", "")),
-                    "resolved_at": format_datetime(incident.get("resolved_at", "")),
-                    "resolver_name": resolver.get("name", "Unknown"),
-                    "resolver_email": resolver.get("email", "Unknown"),
-                    "resolver_id": resolver.get("id", "Unknown"),
-                    "service": incident.get("service", "N/A"),
-                    "service_id": incident.get("service_id", "N/A"),
-                    "urgency": incident.get("urgency", "N/A"),
-                }
-            )
+        if data:
+            writer.writerows(data)
 
-    logger.info(f"✓ CSV report saved to '{filename}'")
+    logger.info(f"✓ CSV report saved: '{filename}'")
+    return filename
 
 
 class WideHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
-    """Custom help formatter providing extended spacing for flag alignment[cite: 10]."""
+    """Custom help formatter that increases the spacing between flags and descriptions[cite: 7]."""
 
     def __init__(self, prog: str):
         super().__init__(prog, max_help_position=40, width=110)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build CLI parser options."""
+    """Configures command line interface options[cite: 7]."""
     parser = argparse.ArgumentParser(
-        description=f"Export resolved PagerDuty incidents with resolver info v{__version__}",
+        description=f"PagerDuty Incident Data Exporter v{__version__}",
         formatter_class=WideHelpFormatter,
     )
     parser.add_argument(
@@ -342,20 +278,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Custom timezone offset or IANA name for relative lookback calculations (e.g., 'America/New_York', '-05:00', 'UTC')",
     )
     parser.add_argument(
-        "--service-id",
-        action="append",
-        dest="service_ids",
-        help="Service ID to filter (repeatable)",
+        "-o", "--output", default="pagerduty_incidents", help="Custom CSV filename prefix"
     )
     parser.add_argument(
-        "-o", "--output", default="pagerduty_resolved_incidents", help="Custom CSV filename prefix"
-    )
-    parser.add_argument(
-        "-r",
-        "--rate-limit",
-        type=int,
-        default=8,
-        help="Maximum API requests per second",
+        "-r", "--rate-limit", type=int, default=8, help="Max API requests per second"
     )
     return parser
 
@@ -363,13 +289,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
 
-    # Automatically show help and exit if no CLI arguments are supplied[cite: 10]
+    # Automatically show help and exit if no CLI arguments are supplied[cite: 7]
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(0)
 
     args = parser.parse_args()
 
+    # Secure environment variable token acquisition[cite: 7]
     api_token = os.environ.get("PAGERDUTY_API_TOKEN") or os.environ.get("API_TOKEN")
     if not api_token or api_token.strip() == "YOUR_API_TOKEN_HERE":
         logger.error(
@@ -415,33 +342,34 @@ def main() -> None:
 
         logger.info(f"Executing raw API time window: {since} -> {until}")
 
-    service_ids = args.service_ids or []
-    if not service_ids:
-        env_services = os.environ.get("SERVICE_IDS", "").strip()
-        if env_services:
-            service_ids = [s.strip() for s in env_services.split(",") if s.strip()]
-
+    # Standard Timestamp Versioned Output Filename: <prefix>_YYYYMMDD-HHMMSS.csv[cite: 7, 8]
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    prefix = args.output or os.environ.get("OUTPUT_FILE") or "pagerduty_resolved_incidents"
+    prefix = args.output or os.environ.get("OUTPUT_FILE") or "pagerduty_incidents"
     if prefix.endswith(".csv"):
         prefix = prefix[:-4]
     output_filename = f"{prefix}_{timestamp}.csv"
 
     try:
         api = PagerDutyAPI(api_token, rate_limit=args.rate_limit)
-        start_time = time.time()
+        if not api.validate_token():
+            sys.exit(1)
 
-        incidents = api.get_resolved_incidents(since=since, until=until, service_ids=service_ids)
+        start_time = time.time()
+        
+        # Incident retrieval natively handles exact ISO strings or nulls[cite: 7]
+        incidents = api.get_incidents(since=since, until=until)
+
         if not incidents:
-            logger.warning("No resolved incidents found matching the criteria.")
+            logger.warning("No incidents matched the target date range.")
             sys.exit(0)
 
-        export_to_csv(incidents, filename=output_filename)
+        results = extract_incident_data(incidents)
+        output_filename = write_csv(results, filename=output_filename)
 
         elapsed = time.time() - start_time
         print(f"\n{'='*60}")
-        print(f"✓ Processed {len(incidents)} resolved incidents in {elapsed:.2f}s")
-        print(f"✓ Output file: {output_filename}")
+        print(f"✓ Processed {len(incidents)} incidents in {elapsed:.2f}s")
+        print(f"✓ Report output: {output_filename}")
         print(f"{'='*60}\n")
 
     except KeyboardInterrupt:

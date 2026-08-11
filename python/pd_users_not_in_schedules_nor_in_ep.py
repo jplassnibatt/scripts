@@ -1,394 +1,389 @@
-import requests
-import json
+#!/usr/bin/env python3
+import argparse
+import csv
+import logging
 import os
 import sys
-import csv
-from time import sleep, time
-from datetime import datetime
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Tuple, Optional
-import logging
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
+import requests
 
-# Configure logging
+__version__ = "1.0.0"
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-# Role mapping dictionary
 ROLE_MAPPING = {
-    'admin': 'Global Admin',
-    'limited_user': 'Responder',
-    'owner': 'Account Owner',
-    'read_only_user': 'Stakeholder',
-    'read_only_limited_user': 'Limited Stakeholder',
-    'user': 'Full User',
-    'observer': 'Observer',
-    'restricted_access': 'Restricted Access'
+    "admin": "Global Admin",
+    "limited_user": "Responder",
+    "owner": "Account Owner",
+    "read_only_user": "Stakeholder",
+    "read_only_limited_user": "Limited Stakeholder",
+    "user": "Full User",
+    "observer": "Observer",
+    "restricted_access": "Restricted Access",
 }
 
-class RateLimiter:
-    """Simple rate limiter to respect API limits"""
-    def __init__(self, max_requests_per_second: int = 10):
-        self.max_requests_per_second = max_requests_per_second
+
+class ThreadSafeRateLimiter:
+    """Thread-safe rate limiter to enforce client-side request throttling."""
+
+    def __init__(self, max_requests_per_second: int = 8):
         self.min_interval = 1.0 / max_requests_per_second
-        self.last_request_time = 0
-        
-    def wait_if_needed(self):
-        """Wait if necessary to respect rate limits"""
-        current_time = time()
-        time_since_last_request = current_time - self.last_request_time
-        
-        if time_since_last_request < self.min_interval:
-            sleep_time = self.min_interval - time_since_last_request
-            sleep(sleep_time)
-        
-        self.last_request_time = time()
+        self.last_request_time = 0.0
+        self.lock = threading.Lock()
+
+    def acquire(self) -> None:
+        """Wait if necessary to respect rate limits."""
+        with self.lock:
+            current_time = time.time()
+            time_since_last_request = current_time - self.last_request_time
+
+            if time_since_last_request < self.min_interval:
+                time.sleep(self.min_interval - time_since_last_request)
+
+            self.last_request_time = time.time()
+
 
 class PagerDutyAPI:
-    def __init__(self, api_token: str, rate_limit: int = 10):
-        """
-        Initialize PagerDuty API client
-        
-        Args:
-            api_token: PagerDuty API token
-            rate_limit: Maximum requests per second (default: 10)
-        """
-        self.base_url = "https://api.pagerduty.com"
-        self.headers = {
-            "Accept": "application/vnd.pagerduty+json;version=2",
-            "Authorization": f"Token token={api_token}",
-            "Content-Type": "application/json"
-        }
-        self.session = requests.Session()
-        self.session.headers.update(self.headers)
-        self.rate_limiter = RateLimiter(max_requests_per_second=rate_limit)
-        self.max_retries = 3
-        self.retry_delay = 2  # seconds
+    """PagerDuty REST API v2 client with thread-safe rate limiting and error handling."""
 
-    def _make_request(self, method: str, endpoint: str, **kwargs) -> Optional[requests.Response]:
-        """
-        Make an API request with rate limiting and retry logic
-        
-        Args:
-            method: HTTP method (GET, POST, etc.)
-            endpoint: API endpoint
-            **kwargs: Additional arguments for requests
-            
-        Returns:
-            Response object or None if all retries failed
-        """
+    def __init__(self, api_token: str, rate_limit: int = 8):
+        if not api_token or not api_token.strip():
+            raise ValueError("API token cannot be empty")
+
+        self.base_url = "https://api.pagerduty.com"
+        self.rate_limiter = ThreadSafeRateLimiter(max_requests_per_second=rate_limit)
+        self.max_retries = 3
+        self.timeout = 30
+
+        self.session = requests.Session()
+        self.session.headers.update(
+            {
+                "Accept": "application/vnd.pagerduty+json;version=2",
+                "Authorization": f"Token token={api_token.strip()}",
+                "Content-Type": "application/json",
+                "User-Agent": f"PagerDutyDevBuddy-UserAssignmentAnalyzer/{__version__}",
+            }
+        )
+
+    def _make_request(
+        self, method: str, url: str, **kwargs
+    ) -> Optional[requests.Response]:
+        """Make an API request with exponential backoff and rate-limit handling."""
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = self.timeout
+
         for attempt in range(self.max_retries):
             try:
-                self.rate_limiter.wait_if_needed()
-                response = self.session.request(method, endpoint, **kwargs)
-                
-                # Handle rate limiting (429 status code)
+                self.rate_limiter.acquire()
+                response = self.session.request(method, url, **kwargs)
+
                 if response.status_code == 429:
-                    retry_after = int(response.headers.get('Retry-After', 60))
-                    logger.warning(f"Rate limited. Waiting {retry_after} seconds...")
-                    sleep(retry_after)
+                    retry_after = int(response.headers.get("Retry-After", 60))
+                    logger.warning(
+                        f"Rate limited ($Rate = {self.rate_limiter.min_interval:.3f}\\text{{s/req}}$). Waiting {retry_after}s..."
+                    )
+                    time.sleep(retry_after)
                     continue
-                
+
+                if response.status_code in (401, 403):
+                    logger.error(
+                        f"Authentication failed (HTTP {response.status_code}). Check PAGERDUTY_API_TOKEN permissions."
+                    )
+                    sys.exit(1)
+
                 response.raise_for_status()
                 return response
-                
-            except requests.exceptions.HTTPError as e:
-                if response.status_code == 401:
-                    logger.error("Authentication failed. Please check your API token.")
-                    raise
-                elif response.status_code == 403:
-                    logger.error("Access forbidden. Check API token permissions.")
-                    raise
-                elif attempt < self.max_retries - 1:
-                    logger.warning(f"Request failed (attempt {attempt + 1}/{self.max_retries}): {e}")
-                    sleep(self.retry_delay * (attempt + 1))
+
+            except requests.exceptions.Timeout:
+                if attempt < self.max_retries - 1:
+                    logger.warning(
+                        f"Timeout encountered (attempt {attempt + 1}/{self.max_retries})"
+                    )
+                    time.sleep(2**attempt)
                 else:
-                    logger.error(f"Request failed after {self.max_retries} attempts: {e}")
-                    raise
-                    
+                    logger.error("Request timed out after maximum retries.")
+                    return None
+
             except requests.exceptions.RequestException as e:
                 if attempt < self.max_retries - 1:
-                    logger.warning(f"Request error (attempt {attempt + 1}/{self.max_retries}): {e}")
-                    sleep(self.retry_delay * (attempt + 1))
+                    logger.warning(
+                        f"Request failed (attempt {attempt + 1}/{self.max_retries}): {e}"
+                    )
+                    time.sleep(2**attempt)
                 else:
                     logger.error(f"Request failed after {self.max_retries} attempts: {e}")
                     return None
-        
+
         return None
 
     def validate_token(self) -> bool:
-        """
-        Validate the API token by making a test request
-        
-        Returns:
-            True if token is valid, False otherwise
-        """
-        try:
-            endpoint = f"{self.base_url}/users"
-            params = {"limit": 1}
-            response = self._make_request("GET", endpoint, params=params)
-            return response is not None and response.status_code == 200
-        except Exception as e:
-            logger.error(f"Token validation failed: {e}")
-            return False
+        """Validate API token credentials against the `/users` endpoint."""
+        logger.info("Validating API token...")
+        response = self._make_request("GET", f"{self.base_url}/users", params={"limit": 1})
+        if response is not None and response.status_code == 200:
+            logger.info("✓ API token validated successfully")
+            return True
+        return False
 
     def get_all_users(self) -> List[Dict]:
-        """Get all users from PagerDuty with pagination"""
-        endpoint = f"{self.base_url}/users"
-        all_users = []
+        """Fetch all users from PagerDuty using offset pagination."""
+        users = []
         offset = 0
         limit = 100
 
+        logger.info("Fetching users from PagerDuty...")
+
         while True:
-            params = {
-                "offset": offset,
-                "limit": limit,
-                "total": True,
-                "include[]": ["contact_methods"]
-            }
+            params = {"offset": offset, "limit": limit, "total": True}
+            response = self._make_request("GET", f"{self.base_url}/users", params=params)
 
-            response = self._make_request("GET", endpoint, params=params)
             if not response:
-                logger.error("Failed to fetch users")
-                break
-                
-            data = response.json()
-            users = data.get('users', [])
-            
-            if not users:
+                logger.error("Failed to fetch users.")
                 break
 
-            all_users.extend(users)
-            
-            # Log progress
-            total = data.get('total', len(all_users))
-            logger.info(f"Fetched {len(all_users)}/{total} users")
+            if response.status_code == 200:
+                data = response.json()
+                batch_users = data.get("users", [])
+                users.extend(batch_users)
 
-            if not data.get('more', False):
+                total = data.get("total", len(users))
+                logger.info(f"Fetched {len(users)}/{total} users")
+
+                if not data.get("more", False) or len(batch_users) < limit:
+                    break
+
+                offset += limit
+            else:
+                logger.error(f"Error fetching users: {response.status_code}")
                 break
 
-            offset += limit
-
-        return all_users
+        return users
 
     def get_user_escalation_policies(self, user_id: str) -> List[Dict]:
-        """Get escalation policies for a specific user"""
-        endpoint = f"{self.base_url}/users/{user_id}/escalation_policies"
-        response = self._make_request("GET", endpoint)
-        
+        """Get escalation policies associated with a specific user."""
+        response = self._make_request(
+            "GET", f"{self.base_url}/users/{user_id}/escalation_policies"
+        )
         if response:
-            return response.json().get('escalation_policies', [])
+            return response.json().get("escalation_policies", [])
         return []
 
     def get_user_schedules(self, user_id: str) -> List[Dict]:
-        """Get schedules for a specific user"""
-        endpoint = f"{self.base_url}/users/{user_id}/schedules"
-        response = self._make_request("GET", endpoint)
-        
+        """Get schedules associated with a specific user."""
+        response = self._make_request(
+            "GET", f"{self.base_url}/users/{user_id}/schedules"
+        )
         if response:
-            return response.json().get('schedules', [])
+            return response.json().get("schedules", [])
         return []
 
-    def get_user_data(self, user_id: str) -> Tuple[List[Dict], List[Dict]]:
-        """Get both escalation policies and schedules for a user"""
-        # Sequential calls to respect rate limiting better
+    def get_user_assignments(self, user: Dict) -> Dict:
+        """Get escalation policies and schedules for a user."""
+        user_id = user.get("id", "")
+        role_raw = user.get("role", "unknown")
+        role_name = ROLE_MAPPING.get(role_raw, role_raw.replace("_", " ").title())
+
         policies = self.get_user_escalation_policies(user_id)
         schedules = self.get_user_schedules(user_id)
-        return policies, schedules
 
-def get_proper_role_name(role: str) -> str:
-    """Convert API role to proper display name"""
-    return ROLE_MAPPING.get(role, role.replace('_', ' ').title())
+        return {
+            "id": user_id,
+            "name": user.get("name", "Unknown"),
+            "email": user.get("email", "N/A"),
+            "role": role_name,
+            "policies": [{"id": p["id"], "name": p["name"]} for p in policies],
+            "schedules": [{"id": s["id"], "name": s["name"]} for s in schedules],
+        }
 
-def analyze_all_users(api_token: str) -> List[Dict]:
-    """
-    Analyze all PagerDuty users and their assignments
-    
-    Args:
-        api_token: PagerDuty API token
-        
-    Returns:
-        List of user data dictionaries
-    """
-    pd_api = PagerDutyAPI(api_token, rate_limit=8)  # Conservative rate limit
+
+def process_users_assignments(
+    api: PagerDutyAPI, users: List[Dict], max_workers: int = 5
+) -> List[Dict]:
+    """Process user assignments concurrently using ThreadPoolExecutor."""
     results = []
+    total_users = len(users)
 
-    try:
-        logger.info("Validating API token...")
-        if not pd_api.validate_token():
-            logger.error("Invalid API token. Please check your API_TOKEN environment variable.")
-            sys.exit(1)
-        
-        logger.info("Fetching all users...")
-        users = pd_api.get_all_users()
-        total_users = len(users)
-        
-        if total_users == 0:
-            logger.warning("No users found")
-            return results
-            
-        logger.info(f"Found {total_users} users")
-        logger.info("Processing users...")
+    logger.info(f"Analyzing assignments for {total_users} users with {max_workers} workers...")
 
-        # Process users sequentially to better control rate limiting
-        for index, user in enumerate(users, 1):
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_user = {
+            executor.submit(api.get_user_assignments, user): user for user in users
+        }
+
+        completed = 0
+        for future in as_completed(future_to_user):
             try:
-                if index % 10 == 0 or index == total_users:
-                    logger.info(f"Processing user {index}/{total_users}")
+                res = future.result()
+                results.append(res)
+                completed += 1
 
-                policies, schedules = pd_api.get_user_data(user['id'])
+                if completed % 10 == 0 or completed == total_users:
+                    logger.info(f"Progress: {completed}/{total_users} users analyzed")
 
-                user_result = {
-                    'id': user['id'],
-                    'name': user['name'],
-                    'email': user['email'],
-                    'role': get_proper_role_name(user.get('role', 'unknown')),
-                    'policies': [{
-                        'id': p['id'],
-                        'name': p['name']
-                    } for p in policies],
-                    'schedules': [{
-                        'id': s['id'],
-                        'name': s['name']
-                    } for s in schedules]
-                }
-                results.append(user_result)
-                
             except Exception as e:
-                logger.error(f"Error processing user {user.get('name', 'unknown')}: {e}")
-                continue
+                user = future_to_user[future]
+                logger.error(
+                    f"Error analyzing user {user.get('name', user.get('id'))}: {e}"
+                )
+                results.append(
+                    {
+                        "id": user.get("id", ""),
+                        "name": user.get("name", "Unknown"),
+                        "email": user.get("email", "N/A"),
+                        "role": user.get("role", "N/A"),
+                        "policies": [],
+                        "schedules": [],
+                    }
+                )
+                completed += 1
 
-        logger.info("Analysis complete!")
-        return results
+    return results
 
-    except KeyboardInterrupt:
-        logger.warning("\nAnalysis interrupted by user")
-        return results
-    except Exception as e:
-        logger.error(f"Error during analysis: {str(e)}")
-        return results
 
-def print_analysis_results(results: List[Dict]):
-    """Print the analysis results in a readable format"""
-    print("\n" + "="*60)
-    print("ANALYSIS RESULTS".center(60))
-    print("="*60 + "\n")
+def export_to_csv(
+    results: List[Dict], prefix: str = "pagerduty_user_assignments"
+) -> str:
+    """Export user assignment analysis to a timestamp-versioned CSV file."""
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    filename = f"{prefix}_{timestamp}.csv"
 
-    users_with_assignments = [u for u in results if u['policies'] or u['schedules']]
-    users_without_assignments = [u for u in results if not u['policies'] and not u['schedules']]
+    fieldnames = [
+        "Name",
+        "Email",
+        "Role",
+        "Has EPs",
+        "Escalation Policies",
+        "Has Schedules",
+        "Schedules",
+    ]
 
-    print(f"Total users analyzed: {len(results)}")
-    print(f"Users with assignments: {len(users_with_assignments)}")
-    print(f"Users without any assignments: {len(users_without_assignments)}")
+    with open(filename, "w", newline="", encoding="utf-8") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
 
-    if users_with_assignments:
-        print("\n" + "="*60)
-        print("USERS WITH ASSIGNMENTS".center(60))
-        print("="*60)
-        
-        for user in users_with_assignments:
-            print(f"\n{'─'*60}")
-            print(f"User: {user['name']}")
-            print(f"Email: {user['email']}")
-            print(f"Role: {user['role']}")
+        for user in results:
+            writer.writerow(
+                {
+                    "Name": user.get("name", "N/A"),
+                    "Email": user.get("email", "N/A"),
+                    "Role": user.get("role", "N/A"),
+                    "Has EPs": "Yes" if user.get("policies") else "No",
+                    "Escalation Policies": "; ".join(
+                        [p["name"] for p in user.get("policies", [])]
+                    ),
+                    "Has Schedules": "Yes" if user.get("schedules") else "No",
+                    "Schedules": "; ".join(
+                        [s["name"] for s in user.get("schedules", [])]
+                    ),
+                }
+            )
 
-            if user['policies']:
-                print("\nEscalation Policies:")
-                for policy in user['policies']:
-                    print(f"  • {policy['name']} (ID: {policy['id']})")
+    logger.info(f"✓ CSV report saved to '{filename}'")
+    return filename
 
-            if user['schedules']:
-                print("\nSchedules:")
-                for schedule in user['schedules']:
-                    print(f"  • {schedule['name']} (ID: {schedule['id']})")
 
-    if users_without_assignments:
-        print("\n" + "="*60)
-        print("USERS WITHOUT ANY ASSIGNMENTS".center(60))
-        print("="*60)
-        
-        for user in users_without_assignments:
-            print(f"\n{'─'*60}")
-            print(f"User: {user['name']}")
-            print(f"Email: {user['email']}")
-            print(f"Role: {user['role']}")
+class WideHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
+    """Custom help formatter providing extended spacing for flag alignment."""
 
-    print("\n" + "="*60 + "\n")
+    def __init__(self, prog: str):
+        super().__init__(prog, max_help_position=40, width=110)
 
-def export_to_csv(results: List[Dict]) -> str:
-    """
-    Export results to CSV file with timestamp
-    
-    Args:
-        results: List of user data dictionaries
-        
-    Returns:
-        Filename of the exported CSV
-    """
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"pagerduty_user_assignments_{timestamp}.csv"
 
-    try:
-        with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
-            fieldnames = ['Name', 'Email', 'Role', 'Has EPs', 'Escalation Policies',
-                         'Has Schedules', 'Schedules']
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+def build_parser() -> argparse.ArgumentParser:
+    """Configure command line arguments."""
+    parser = argparse.ArgumentParser(
+        description=f"Analyze PagerDuty user Escalation Policy and Schedule assignments v{__version__}",
+        formatter_class=WideHelpFormatter,
+    )
+    parser.add_argument(
+        "-v", "--version", action="version", version=f"%(prog)s v{__version__}"
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        default="pagerduty_user_assignments",
+        help="Output CSV filename prefix",
+    )
+    parser.add_argument(
+        "-w",
+        "--max-workers",
+        type=int,
+        default=5,
+        help="Maximum concurrent workers (1-20)",
+    )
+    parser.add_argument(
+        "-r",
+        "--rate-limit",
+        type=int,
+        default=8,
+        help="Maximum API requests per second",
+    )
+    return parser
 
-            writer.writeheader()
-            for user in results:
-                writer.writerow({
-                    'Name': user['name'],
-                    'Email': user['email'],
-                    'Role': user['role'],
-                    'Has EPs': 'Yes' if user['policies'] else 'No',
-                    'Escalation Policies': '; '.join([p['name'] for p in user['policies']]),
-                    'Has Schedules': 'Yes' if user['schedules'] else 'No',
-                    'Schedules': '; '.join([s['name'] for s in user['schedules']])
-                })
 
-        logger.info(f"Results exported to {filename}")
-        return filename
-        
-    except Exception as e:
-        logger.error(f"Failed to export CSV: {e}")
-        return ""
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
 
-def main():
-    """Main execution function"""
-    print("\n" + "="*60)
-    print("PAGERDUTY USER ASSIGNMENT ANALYZER".center(60))
-    print("="*60 + "\n")
-    
-    # Get API token from environment variable
-    API_TOKEN = os.getenv("API_TOKEN", "").strip()
-    
-    # Validate API token is set
-    if not API_TOKEN or API_TOKEN == "YOUR_PAGERDUTY_API_TOKEN_HERE":
-        logger.error("ERROR: API_TOKEN environment variable is not set!")
-        logger.error("Please set your PagerDuty API token:")
-        logger.error("  export API_TOKEN='your-api-token-here'")
+    api_token = os.environ.get("PAGERDUTY_API_TOKEN") or os.environ.get("API_TOKEN")
+    if not api_token:
+        logger.error(
+            "ERROR: Missing API token. Export PAGERDUTY_API_TOKEN environment variable."
+        )
+        sys.exit(1)
+
+    if args.max_workers < 1 or args.max_workers > 20:
+        logger.error("Max workers must be between 1 and 20.")
+        sys.exit(1)
+    if args.rate_limit < 1 or args.rate_limit > 100:
+        logger.error("Rate limit must be between 1 and 100.")
         sys.exit(1)
 
     try:
-        results = analyze_all_users(api_token=API_TOKEN)
-        
-        if not results:
-            logger.warning("No results to display")
-            return
-            
-        print_analysis_results(results)
-        export_to_csv(results)
-        
-        logger.info("Process completed successfully!")
+        api = PagerDutyAPI(api_token, rate_limit=args.rate_limit)
+        if not api.validate_token():
+            sys.exit(1)
+
+        start_time = time.time()
+        users = api.get_all_users()
+        if not users:
+            logger.warning("No users found.")
+            sys.exit(0)
+
+        results = process_users_assignments(
+            api, users, max_workers=args.max_workers
+        )
+        output_filename = export_to_csv(results, prefix=args.output)
+
+        elapsed = time.time() - start_time
+        assigned_users = sum(1 for u in results if u["policies"] or u["schedules"])
+        unassigned_users = len(results) - assigned_users
+
+        print("\n" + "=" * 70)
+        print("ANALYSIS SUMMARY".center(70))
+        print("=" * 70)
+        print(f"Total Users Analyzed:    {len(results)}")
+        print(f"Users with Assignments:  {assigned_users}")
+        print(f"Unassigned Users:        {unassigned_users}")
+        print(f"Execution Time:          {elapsed:.2f}s")
+        print(f"Output File:             {output_filename}")
+        print("=" * 70 + "\n")
 
     except KeyboardInterrupt:
-        logger.warning("\nProcess interrupted by user")
+        logger.warning("\nProcess interrupted by user. Exiting safely.")
         sys.exit(0)
     except Exception as e:
-        logger.error(f"Unexpected error occurred: {str(e)}")
+        logger.error(f"Execution failed: {e}")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
