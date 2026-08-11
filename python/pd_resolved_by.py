@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Dict, List, Optional
 import requests
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -64,7 +64,7 @@ def parse_timezone(tz_str: str) -> tzinfo:
 
 
 class PagerDutyAPI:
-    """PagerDuty REST API v2 client with user caching, rate limiting, and session management[cite: 10]."""
+    """PagerDuty REST API v2 client with user caching, rate limiting, and session management."""
 
     def __init__(self, api_token: str, rate_limit: int = 8):
         if not api_token or not api_token.strip():
@@ -86,7 +86,7 @@ class PagerDutyAPI:
         )
 
     def _rate_limit(self) -> None:
-        """Enforces client-side rate limiting ($Rate = 8\\text{ req/s}$)[cite: 10]."""
+        """Enforces client-side rate limiting ($Rate = 8\\text{ req/s}$)."""
         elapsed = time.time() - self.last_request
         if elapsed < self.min_interval:
             time.sleep(self.min_interval - elapsed)
@@ -95,7 +95,7 @@ class PagerDutyAPI:
     def _request(
         self, url: str, params: Optional[Dict] = None, max_retries: int = 3
     ) -> Optional[requests.Response]:
-        """Makes an HTTP GET request with retry backoff and rate-limit handling[cite: 10]."""
+        """Makes an HTTP GET request with retry backoff and rate-limit handling."""
         for attempt in range(max_retries):
             try:
                 self._rate_limit()
@@ -141,7 +141,7 @@ class PagerDutyAPI:
         return None
 
     def get_user_details(self, user_id: str) -> Optional[Dict[str, str]]:
-        """Fetch user details with local memory caching to eliminate duplicate API requests[cite: 10]."""
+        """Fetch user details with local memory caching to eliminate duplicate API requests."""
         if user_id in self.user_cache:
             return self.user_cache[user_id]
 
@@ -159,7 +159,7 @@ class PagerDutyAPI:
     def get_resolved_incidents(
         self, since: Optional[str] = None, until: Optional[str] = None, service_ids: Optional[List[str]] = None
     ) -> List[Dict]:
-        """Fetch resolved incidents using offset pagination and dynamic time windows[cite: 10]."""
+        """Fetch resolved incidents using offset pagination and dynamic time windows."""
         logger.info(f"Fetching resolved incidents from window: {since or 'Beginning'} -> {until or 'Now'}")
         if service_ids:
             logger.info(f"Filtering by service IDs: {', '.join(service_ids)}")
@@ -253,7 +253,7 @@ class PagerDutyAPI:
 
 
 def format_datetime(dt_str: str) -> str:
-    """Format ISO datetime string to standard UTC display format[cite: 10]."""
+    """Format ISO datetime string to standard UTC display format."""
     try:
         dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
         return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -261,8 +261,27 @@ def format_datetime(dt_str: str) -> str:
         return dt_str
 
 
-def export_to_csv(incidents: List[Dict], filename: str) -> None:
-    """Export resolved incident records to a timestamp-versioned CSV file."""
+def export_to_csv(
+    incidents: List[Dict],
+    prefix: Optional[str] = None,
+    default_prefix: str = "pagerduty_resolved_incidents"
+) -> Optional[str]:
+    """Export resolved incident records to a safely versioned timestamped CSV file."""
+    if not incidents:
+        logger.info("No resolved incidents available to export.")
+        return None
+
+    # 1. Resolve fallback hierarchy: Explicit CLI arg -> Environment Var -> Default
+    resolved_prefix = prefix or os.environ.get("OUTPUT_FILE") or default_prefix
+
+    # 2. Sanitize extension if user explicitly passed `.csv`
+    if resolved_prefix.endswith(".csv"):
+        resolved_prefix = resolved_prefix[:-4]
+
+    # 3. Construct dynamic collision-proof timestamped filename
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    filename = f"{resolved_prefix}_{timestamp}.csv"
+
     fieldnames = [
         "incident_number",
         "incident_id",
@@ -299,10 +318,11 @@ def export_to_csv(incidents: List[Dict], filename: str) -> None:
             )
 
     logger.info(f"✓ CSV report saved to '{filename}'")
+    return filename
 
 
 class WideHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
-    """Custom help formatter providing extended spacing for flag alignment[cite: 10]."""
+    """Custom help formatter providing extended spacing for flag alignment."""
 
     def __init__(self, prog: str):
         super().__init__(prog, max_help_position=40, width=110)
@@ -363,7 +383,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
 
-    # Automatically show help and exit if no CLI arguments are supplied[cite: 10]
+    # Automatically show help and exit if no CLI arguments are supplied
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(0)
@@ -421,12 +441,6 @@ def main() -> None:
         if env_services:
             service_ids = [s.strip() for s in env_services.split(",") if s.strip()]
 
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    prefix = args.output or os.environ.get("OUTPUT_FILE") or "pagerduty_resolved_incidents"
-    if prefix.endswith(".csv"):
-        prefix = prefix[:-4]
-    output_filename = f"{prefix}_{timestamp}.csv"
-
     try:
         api = PagerDutyAPI(api_token, rate_limit=args.rate_limit)
         start_time = time.time()
@@ -436,12 +450,13 @@ def main() -> None:
             logger.warning("No resolved incidents found matching the criteria.")
             sys.exit(0)
 
-        export_to_csv(incidents, filename=output_filename)
+        # Utilize safely isolated output writing
+        output_filename = export_to_csv(incidents, prefix=args.output)
 
         elapsed = time.time() - start_time
         print(f"\n{'='*60}")
         print(f"✓ Processed {len(incidents)} resolved incidents in {elapsed:.2f}s")
-        print(f"✓ Output file: {output_filename}")
+        print(f"✓ Output file: {output_filename or 'N/A'}")
         print(f"{'='*60}\n")
 
     except KeyboardInterrupt:

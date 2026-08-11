@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Dict, List, Optional
 import requests
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -64,7 +64,7 @@ def parse_timezone(tz_str: str) -> tzinfo:
 
 
 class PagerDutyAnalyticsExporter:
-    """PagerDuty Analytics API client utilizing optimized bulk endpoints for MTTA/MTTR metrics[cite: 8]."""
+    """PagerDuty Analytics API client utilizing optimized bulk endpoints for MTTA/MTTR metrics."""
 
     def __init__(self, api_token: str, rate_limit: int = 4):
         if not api_token or not api_token.strip():
@@ -87,7 +87,7 @@ class PagerDutyAnalyticsExporter:
         )
 
     def _rate_limit(self) -> None:
-        """Enforces basic client-side rate limiting[cite: 8]."""
+        """Enforces basic client-side rate limiting."""
         elapsed = time.time() - self.last_request
         if elapsed < self.min_interval:
             time.sleep(self.min_interval - elapsed)
@@ -96,7 +96,7 @@ class PagerDutyAnalyticsExporter:
     def _request(
         self, method: str, endpoint: str, json_body: Optional[Dict] = None
     ) -> Optional[requests.Response]:
-        """Makes an API request with rate limiting and exponential backoff retries[cite: 8]."""
+        """Makes an API request with rate limiting and exponential backoff retries."""
         url = f"{self.base_url}/{endpoint}"
 
         for attempt in range(self.max_retries):
@@ -138,7 +138,7 @@ class PagerDutyAnalyticsExporter:
         return None
 
     def validate_token(self) -> bool:
-        """Validate API token credentials against the `/users` endpoint[cite: 8]."""
+        """Validate API token credentials against the `/users` endpoint."""
         logger.info("Validating API token...")
         response = self._request("GET", "users")
         if response is not None and response.status_code == 200:
@@ -149,7 +149,7 @@ class PagerDutyAnalyticsExporter:
     def get_analytics_incidents(
         self, since: Optional[str] = None, until: Optional[str] = None
     ) -> List[Dict]:
-        """Fetch pre-calculated incident metrics via POST /analytics/raw/incidents using cursor pagination[cite: 8]."""
+        """Fetch pre-calculated incident metrics via POST /analytics/raw/incidents using cursor pagination."""
         incidents = []
         limit = 1000
 
@@ -188,7 +188,7 @@ class PagerDutyAnalyticsExporter:
 
 
 def format_timedelta(total_seconds: Optional[int]) -> str:
-    """Format total seconds into an HH:MM:SS string[cite: 8]."""
+    """Format total seconds into an HH:MM:SS string."""
     if total_seconds is None:
         return "N/A"
 
@@ -199,7 +199,7 @@ def format_timedelta(total_seconds: Optional[int]) -> str:
 
 
 def process_analytics_data(raw_incidents: List[Dict]) -> List[Dict]:
-    """Map raw analytics data to CSV columns cleanly[cite: 8]."""
+    """Map raw analytics data to CSV columns cleanly."""
     processed = []
 
     for inc in raw_incidents:
@@ -222,8 +222,27 @@ def process_analytics_data(raw_incidents: List[Dict]) -> List[Dict]:
     return processed
 
 
-def export_to_csv(data: List[Dict], filename: str) -> None:
-    """Export processed incident metrics to a dynamic, timestamp-versioned CSV file."""
+def export_to_csv(
+    data: List[Dict],
+    prefix: Optional[str] = None,
+    default_prefix: str = "pagerduty_analytics_metrics"
+) -> Optional[str]:
+    """Exports processed incident metrics to a safely versioned timestamped CSV file."""
+    if not data:
+        logger.info("No data available to export.")
+        return None
+
+    # 1. Resolve fallback hierarchy: Explicit CLI arg -> Environment Var -> Default
+    resolved_prefix = prefix or os.environ.get("OUTPUT_FILE") or default_prefix
+
+    # 2. Sanitize extension if user explicitly passed `.csv`
+    if resolved_prefix.endswith(".csv"):
+        resolved_prefix = resolved_prefix[:-4]
+
+    # 3. Construct dynamic collision-proof timestamped filename
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    filename = f"{resolved_prefix}_{timestamp}.csv"
+
     fieldnames = [
         "Incident ID",
         "Title",
@@ -239,14 +258,14 @@ def export_to_csv(data: List[Dict], filename: str) -> None:
     with open(filename, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
-        if data:
-            writer.writerows(data)
+        writer.writerows(data)
 
     logger.info(f"✓ Metrics report saved to '{filename}'")
+    return filename
 
 
 class WideHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
-    """Custom help formatter providing extended spacing for flag alignment[cite: 8]."""
+    """Custom help formatter providing extended spacing for flag alignment."""
 
     def __init__(self, prog: str):
         super().__init__(prog, max_help_position=40, width=110)
@@ -301,6 +320,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
 
+    # Zero-argument safety guard: Display help menu automatically
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(0)
@@ -352,12 +372,6 @@ def main() -> None:
 
         logger.info(f"Executing raw API time window: {since} -> {until}")
 
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    prefix = args.output or os.environ.get("OUTPUT_FILE") or "pagerduty_analytics_metrics"
-    if prefix.endswith(".csv"):
-        prefix = prefix[:-4]
-    output_filename = f"{prefix}_{timestamp}.csv"
-
     try:
         exporter = PagerDutyAnalyticsExporter(api_token, rate_limit=args.rate_limit)
         if not exporter.validate_token():
@@ -373,7 +387,8 @@ def main() -> None:
 
         processed_incidents = process_analytics_data(raw_incidents)
 
-        export_to_csv(processed_incidents, filename=output_filename)
+        # Utilize safely isolated output writing
+        output_filename = export_to_csv(processed_incidents, prefix=args.output)
         elapsed = time.time() - start_time
 
         print("\n" + "=" * 70)
@@ -382,7 +397,7 @@ def main() -> None:
         print(f"Time Window:         {since or 'Beginning'} -> {until or 'Now'}")
         print(f"Incidents Processed: {len(processed_incidents)}")
         print(f"Execution Time:      {elapsed:.2f}s")
-        print(f"Output File:         {output_filename}")
+        print(f"Output File:         {output_filename or 'N/A'}")
         print("=" * 70 + "\n")
 
     except KeyboardInterrupt:

@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Dict, List, Optional
 import requests
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -86,7 +86,7 @@ class ThreadSafeRateLimiter:
 
 
 class PagerDutyExporter:
-    """PagerDuty REST API v2 client for exporting incident MTTA/MTTR metrics[cite: 9]."""
+    """PagerDuty REST API v2 client for exporting incident MTTA/MTTR metrics."""
 
     def __init__(self, api_token: str, rate_limit: int = 4):
         if not api_token or not api_token.strip():
@@ -111,7 +111,7 @@ class PagerDutyExporter:
     def _make_request(
         self, method: str, endpoint: str, params: Optional[Dict] = None
     ) -> Optional[requests.Response]:
-        """Make an API request with rate limiting and exponential backoff retries[cite: 9]."""
+        """Make an API request with rate limiting and exponential backoff retries."""
         url = f"{self.base_url}/{endpoint}"
 
         for attempt in range(self.max_retries):
@@ -161,7 +161,7 @@ class PagerDutyExporter:
         return None
 
     def validate_token(self) -> bool:
-        """Validate API token credentials against the `/users` endpoint[cite: 9]."""
+        """Validate API token credentials against the `/users` endpoint."""
         logger.info("Validating API token...")
         response = self._make_request("GET", "users", params={"limit": 1})
         if response is not None and response.status_code == 200:
@@ -172,7 +172,7 @@ class PagerDutyExporter:
     def get_incidents(
         self, since: Optional[str] = None, until: Optional[str] = None
     ) -> List[Dict]:
-        """Fetch resolved incidents using offset pagination and dynamic time windows[cite: 9]."""
+        """Fetch resolved incidents using offset pagination and dynamic time windows."""
         incidents = []
         offset = 0
         limit = 100
@@ -210,7 +210,7 @@ class PagerDutyExporter:
         return incidents
 
     def get_service_name(self, service_id: str) -> str:
-        """Fetch service name with local memory caching to avoid redundant API queries[cite: 9]."""
+        """Fetch service name with local memory caching to avoid redundant API queries."""
         if service_id in self.service_cache:
             return self.service_cache[service_id]
 
@@ -224,7 +224,7 @@ class PagerDutyExporter:
         return "Unknown Service"
 
     def get_incident_log_entries(self, incident_id: str) -> List[Dict]:
-        """Fetch all log entries for a specific incident[cite: 9]."""
+        """Fetch all log entries for a specific incident."""
         response = self._make_request("GET", f"incidents/{incident_id}/log_entries")
         if response and response.status_code == 200:
             return response.json().get("log_entries", [])
@@ -233,7 +233,7 @@ class PagerDutyExporter:
     def calculate_time_metrics(
         self, incident: Dict, log_entries: List[Dict]
     ) -> Dict:
-        """Calculate MTTA and MTTR metrics using first acknowledgment time with safe dictionary accesses[cite: 9]."""
+        """Calculate MTTA and MTTR metrics using first acknowledgment time with safe dictionary accesses."""
         created_at_dt = datetime.fromisoformat(
             incident["created_at"].replace("Z", "+00:00")
         )
@@ -283,7 +283,7 @@ class PagerDutyExporter:
 
     @staticmethod
     def _format_timedelta(td: Optional[timedelta]) -> str:
-        """Format timedelta into HH:MM:SS string[cite: 9]."""
+        """Format timedelta into HH:MM:SS string."""
         if not td:
             return "N/A"
 
@@ -295,7 +295,7 @@ class PagerDutyExporter:
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
     def process_single_incident(self, incident: Dict) -> Optional[Dict]:
-        """Process a single incident and extract MTTA/MTTR metrics[cite: 9]."""
+        """Process a single incident and extract MTTA/MTTR metrics."""
         try:
             log_entries = self.get_incident_log_entries(incident["id"])
             metrics = self.calculate_time_metrics(incident, log_entries)
@@ -324,8 +324,27 @@ class PagerDutyExporter:
             return None
 
 
-def export_to_csv(data: List[Dict], filename: str) -> None:
-    """Export processed incident metrics to a dynamic, timestamp-versioned CSV file."""
+def export_to_csv(
+    data: List[Dict],
+    prefix: Optional[str] = None,
+    default_prefix: str = "pagerduty_metrics"
+) -> Optional[str]:
+    """Exports processed incident metrics to a safely versioned timestamped CSV file."""
+    if not data:
+        logger.info("No data available to export.")
+        return None
+
+    # 1. Resolve fallback hierarchy: Explicit CLI arg -> Environment Var -> Default
+    resolved_prefix = prefix or os.environ.get("OUTPUT_FILE") or default_prefix
+
+    # 2. Sanitize extension if user explicitly passed `.csv`
+    if resolved_prefix.endswith(".csv"):
+        resolved_prefix = resolved_prefix[:-4]
+
+    # 3. Construct dynamic collision-proof timestamped filename
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    filename = f"{resolved_prefix}_{timestamp}.csv"
+
     fieldnames = [
         "Incident ID",
         "Title",
@@ -341,14 +360,14 @@ def export_to_csv(data: List[Dict], filename: str) -> None:
     with open(filename, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
-        if data:
-            writer.writerows(data)
+        writer.writerows(data)
 
     logger.info(f"✓ Metrics report saved to '{filename}'")
+    return filename
 
 
 class WideHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
-    """Custom help formatter providing extended spacing for flag alignment[cite: 9]."""
+    """Custom help formatter providing extended spacing for flag alignment."""
 
     def __init__(self, prog: str):
         super().__init__(prog, max_help_position=40, width=110)
@@ -370,10 +389,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use default range (Last 7 days relative to exact current target timezone time)",
     )
     parser.add_argument(
-        "-s", "--since", help="Start date (YYYY-MM-DD or ISO-8601 string)"
+        "-s", "--since", help="Start date (YYYY-MM-DD or ISO 8601 string)"
     )
     parser.add_argument(
-        "-u", "--until", help="End date (YYYY-MM-DD or ISO-8601 string)"
+        "-u", "--until", help="End date (YYYY-MM-DD or ISO 8601 string)"
     )
     parser.add_argument(
         "-l",
@@ -410,7 +429,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
 
-    # Automatically show help and exit if no CLI arguments are supplied[cite: 9]
+    # Automatically show help and exit if no CLI arguments are supplied
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(0)
@@ -466,13 +485,6 @@ def main() -> None:
 
         logger.info(f"Executing raw API time window: {since} -> {until}")
 
-    # Standard Timestamp Versioned Output Filename: <prefix>_YYYYMMDD-HHMMSS.csv[cite: 9, 10]
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    prefix = args.output or os.environ.get("OUTPUT_FILE") or "pagerduty_metrics"
-    if prefix.endswith(".csv"):
-        prefix = prefix[:-4]
-    output_filename = f"{prefix}_{timestamp}.csv"
-
     try:
         exporter = PagerDutyExporter(api_token, rate_limit=args.rate_limit)
         if not exporter.validate_token():
@@ -480,7 +492,7 @@ def main() -> None:
 
         start_time = time.time()
 
-        # Pass dynamic window variables directly to the incident fetcher[cite: 9]
+        # Pass dynamic window variables directly to the incident fetcher
         incidents = exporter.get_incidents(since=since, until=until)
 
         if not incidents:
@@ -510,11 +522,12 @@ def main() -> None:
                 if result:
                     processed_incidents.append(result)
 
-        # Sort incidents chronologically by creation timestamp[cite: 9]
+        # Sort incidents chronologically by creation timestamp
         logger.info("Sorting incidents chronologically by 'Created At' timestamp...")
         processed_incidents.sort(key=lambda x: x.get("Created At", ""))
 
-        export_to_csv(processed_incidents, filename=output_filename)
+        # Utilize safely isolated output writing
+        output_filename = export_to_csv(processed_incidents, prefix=args.output)
         elapsed = time.time() - start_time
 
         print("\n" + "=" * 70)
@@ -523,7 +536,7 @@ def main() -> None:
         print(f"Time Window:         {since or 'Beginning'} -> {until or 'Now'}")
         print(f"Incidents Processed: {len(processed_incidents)}/{len(incidents)}")
         print(f"Execution Time:      {elapsed:.2f}s")
-        print(f"Output File:         {output_filename}")
+        print(f"Output File:         {output_filename or 'N/A'}")
         print("=" * 70 + "\n")
 
     except KeyboardInterrupt:

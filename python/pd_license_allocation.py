@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 import requests
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -299,10 +299,26 @@ def process_users_licenses(
     return processed_users
 
 
-def export_to_csv(users_data: List[Dict], prefix: str = "pagerduty_users_licenses") -> str:
-    """Export user license records to a timestamp-versioned CSV file."""
+def export_to_csv(
+    users_data: List[Dict], 
+    prefix: Optional[str] = None, 
+    default_prefix: str = "pagerduty_users_licenses"
+) -> Optional[str]:
+    """Export user license records to a safely versioned timestamped CSV file."""
+    if not users_data:
+        logger.info("No user data available to export.")
+        return None
+
+    # 1. Resolve fallback hierarchy: Explicit CLI arg -> Environment Var -> Default
+    resolved_prefix = prefix or os.environ.get("OUTPUT_FILE") or default_prefix
+
+    # 2. Sanitize extension if user explicitly passed `.csv`
+    if resolved_prefix.endswith(".csv"):
+        resolved_prefix = resolved_prefix[:-4]
+
+    # 3. Construct dynamic collision-proof timestamped filename
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    filename = f"{prefix}_{timestamp}.csv"
+    filename = f"{resolved_prefix}_{timestamp}.csv"
 
     fieldnames = [
         "user_id",
@@ -316,8 +332,7 @@ def export_to_csv(users_data: List[Dict], prefix: str = "pagerduty_users_license
     with open(filename, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
-        if users_data:
-            writer.writerows(users_data)
+        writer.writerows(users_data)
 
     logger.info(f"✓ CSV file created successfully: '{filename}'")
     return filename
@@ -353,6 +368,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     parser = build_parser()
+
+    # Zero-argument safety guard: Display help menu automatically
+    if len(sys.argv) == 1:
+        parser.print_help()
+        sys.exit(0)
+
     args = parser.parse_args()
 
     api_token = os.environ.get("PAGERDUTY_API_TOKEN") or os.environ.get("API_TOKEN")
@@ -380,6 +401,8 @@ def main() -> None:
         processed_users = process_users_licenses(
             pd_api, users, max_workers=args.max_workers
         )
+        
+        # Utilize safely isolated output writing
         output_filename = export_to_csv(processed_users, prefix=args.output)
 
         final_metrics = pd_api.metrics.get_summary()
@@ -395,7 +418,7 @@ def main() -> None:
         print(f"API Requests:       {final_metrics['total_requests']}")
         print(f"  Requests/sec:     {final_metrics['requests_per_second']:.2f}")
         print(f"Elapsed Time:       {final_metrics['elapsed_time']:.2f}s")
-        print(f"Output File:        {output_filename}")
+        print(f"Output File:        {output_filename or 'N/A'}")
         print("=" * 70 + "\n")
 
     except KeyboardInterrupt:

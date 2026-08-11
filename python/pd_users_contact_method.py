@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import requests
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -277,11 +277,25 @@ def process_user_contact_methods(
 
 
 def export_to_csv(
-    data: List[Tuple[Dict, List[Dict]]], prefix: str = "pagerduty_contacts_per_user"
-) -> str:
-    """Export aggregated contact methods to a dynamic, timestamp-versioned CSV file."""
+    data: List[Tuple[Dict, List[Dict]]], 
+    prefix: Optional[str] = None, 
+    default_prefix: str = "pagerduty_contacts_per_user"
+) -> Optional[str]:
+    """Export aggregated contact methods to a dynamic, safely versioned timestamped CSV file."""
+    if not data:
+        logger.info("No data available to export.")
+        return None
+
+    # 1. Resolve fallback hierarchy: Explicit CLI arg -> Environment Var -> Default
+    resolved_prefix = prefix or os.environ.get("OUTPUT_FILE") or default_prefix
+
+    # 2. Sanitize extension if user explicitly passed `.csv`
+    if resolved_prefix.endswith(".csv"):
+        resolved_prefix = resolved_prefix[:-4]
+
+    # 3. Construct dynamic collision-proof timestamped filename
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    filename = f"{prefix}_{timestamp}.csv"
+    filename = f"{resolved_prefix}_{timestamp}.csv"
 
     fieldnames = [
         "User ID",
@@ -352,6 +366,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     parser = build_parser()
+
+    # Zero-argument safety guard: Display help menu automatically
+    if len(sys.argv) == 1:
+        parser.print_help()
+        sys.exit(0)
+
     args = parser.parse_args()
 
     api_token = os.environ.get("PAGERDUTY_API_TOKEN") or os.environ.get("API_TOKEN")
@@ -381,6 +401,8 @@ def main() -> None:
         results = process_user_contact_methods(
             api, users, max_workers=args.max_workers
         )
+        
+        # Utilize safely isolated output writing
         output_filename = export_to_csv(results, prefix=args.output)
 
         final_metrics = api.metrics.get_summary()
@@ -395,7 +417,7 @@ def main() -> None:
         print(f"Total Contacts Found:     {final_metrics['total_contact_methods']}")
         print(f"Processing Time:          {final_metrics['elapsed_time']:.2f}s")
         print(f"Avg Requests/sec:         {final_metrics['requests_per_second']:.2f}")
-        print(f"Output File:              {output_filename}")
+        print(f"Output File:              {output_filename or 'N/A'}")
         print("=" * 70 + "\n")
 
     except KeyboardInterrupt:

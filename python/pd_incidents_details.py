@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Dict, List, Optional
 import requests
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -64,9 +64,9 @@ def parse_timezone(tz_str: str) -> tzinfo:
 
 
 class PagerDutyAPI:
-    """PagerDuty REST API v2 client with built-in rate-limiting and session management[cite: 7].
+    """PagerDuty REST API v2 client with built-in rate-limiting and session management.
 
-    Handles default rate limits of $Rate = 250\\text{ req/min}$ with client-side throttling[cite: 7].
+    Handles default rate limits of $Rate = 250\\text{ req/min}$ with client-side throttling.
     """
 
     def __init__(self, api_token: str, rate_limit: int = 8):
@@ -74,7 +74,7 @@ class PagerDutyAPI:
             raise ValueError("API token cannot be empty")
 
         self.base_url = "https://api.pagerduty.com"
-        self.min_interval = 1.0 / rate_limit  # Throttling interval in seconds[cite: 7]
+        self.min_interval = 1.0 / rate_limit
         self.last_request = 0.0
 
         self.session = requests.Session()
@@ -88,7 +88,7 @@ class PagerDutyAPI:
         )
 
     def _rate_limit(self) -> None:
-        """Enforces client-side rate limiting ($Rate = 8\\text{ req/s}$)[cite: 7]."""
+        """Enforces client-side rate limiting ($Rate = 8\\text{ req/s}$)."""
         elapsed = time.time() - self.last_request
         if elapsed < self.min_interval:
             time.sleep(self.min_interval - elapsed)
@@ -97,7 +97,7 @@ class PagerDutyAPI:
     def _request(
         self, url: str, params: Optional[Dict] = None, max_retries: int = 3
     ) -> Optional[requests.Response]:
-        """Makes API request with exponential backoff and rate-limit mitigation[cite: 7]."""
+        """Makes API request with exponential backoff and rate-limit mitigation."""
         for attempt in range(max_retries):
             try:
                 self._rate_limit()
@@ -141,7 +141,7 @@ class PagerDutyAPI:
         return None
 
     def validate_token(self) -> bool:
-        """Validates API token credentials against the `/users` endpoint[cite: 7]."""
+        """Validates API token credentials against the `/users` endpoint."""
         logger.info("Validating API token...")
         response = self._request(f"{self.base_url}/users", params={"limit": 1})
         if response and response.status_code == 200:
@@ -152,7 +152,7 @@ class PagerDutyAPI:
     def get_incidents(
         self, since: Optional[str] = None, until: Optional[str] = None
     ) -> List[Dict]:
-        """Fetches all incidents within specified date range using offset pagination[cite: 7]."""
+        """Fetches all incidents within specified date range using offset pagination."""
         incidents = []
         offset = 0
         limit = 100
@@ -190,7 +190,7 @@ class PagerDutyAPI:
 
 
 def extract_incident_data(incidents: List[Dict]) -> List[Dict]:
-    """Extracts and flattens incident records into structured dictionaries[cite: 7]."""
+    """Extracts and flattens incident records into structured dictionaries."""
     results = []
 
     for incident in incidents:
@@ -214,8 +214,23 @@ def extract_incident_data(incidents: List[Dict]) -> List[Dict]:
     return results
 
 
-def write_csv(data: List[Dict], filename: str) -> str:
-    """Exports dataset to a dynamic, timestamp-versioned CSV file."""
+def export_to_csv(
+    data: List[Dict],
+    prefix: Optional[str] = None,
+    default_prefix: str = "pagerduty_incidents"
+) -> str:
+    """Exports dataset to a safely versioned, timestamped CSV file."""
+    # 1. Resolve fallback hierarchy: Explicit CLI arg -> Environment Var -> Default
+    resolved_prefix = prefix or os.environ.get("OUTPUT_FILE") or default_prefix
+
+    # 2. Sanitize extension if user explicitly passed `.csv`
+    if resolved_prefix.endswith(".csv"):
+        resolved_prefix = resolved_prefix[:-4]
+
+    # 3. Construct dynamic collision-proof timestamped filename
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    filename = f"{resolved_prefix}_{timestamp}.csv"
+
     fieldnames = [
         "incident_id",
         "incident_number",
@@ -238,14 +253,14 @@ def write_csv(data: List[Dict], filename: str) -> str:
 
 
 class WideHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
-    """Custom help formatter that increases the spacing between flags and descriptions[cite: 7]."""
+    """Custom help formatter that increases the spacing between flags and descriptions."""
 
     def __init__(self, prog: str):
         super().__init__(prog, max_help_position=40, width=110)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Configures command line interface options[cite: 7]."""
+    """Configures command line interface options."""
     parser = argparse.ArgumentParser(
         description=f"PagerDuty Incident Data Exporter v{__version__}",
         formatter_class=WideHelpFormatter,
@@ -289,14 +304,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
 
-    # Automatically show help and exit if no CLI arguments are supplied[cite: 7]
+    # Automatically show help and exit if no CLI arguments are supplied
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(0)
 
     args = parser.parse_args()
 
-    # Secure environment variable token acquisition[cite: 7]
+    # Secure environment variable token acquisition
     api_token = os.environ.get("PAGERDUTY_API_TOKEN") or os.environ.get("API_TOKEN")
     if not api_token or api_token.strip() == "YOUR_API_TOKEN_HERE":
         logger.error(
@@ -342,13 +357,6 @@ def main() -> None:
 
         logger.info(f"Executing raw API time window: {since} -> {until}")
 
-    # Standard Timestamp Versioned Output Filename: <prefix>_YYYYMMDD-HHMMSS.csv[cite: 7, 8]
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    prefix = args.output or os.environ.get("OUTPUT_FILE") or "pagerduty_incidents"
-    if prefix.endswith(".csv"):
-        prefix = prefix[:-4]
-    output_filename = f"{prefix}_{timestamp}.csv"
-
     try:
         api = PagerDutyAPI(api_token, rate_limit=args.rate_limit)
         if not api.validate_token():
@@ -356,7 +364,7 @@ def main() -> None:
 
         start_time = time.time()
         
-        # Incident retrieval natively handles exact ISO strings or nulls[cite: 7]
+        # Incident retrieval natively handles exact ISO strings or nulls
         incidents = api.get_incidents(since=since, until=until)
 
         if not incidents:
@@ -364,7 +372,7 @@ def main() -> None:
             sys.exit(0)
 
         results = extract_incident_data(incidents)
-        output_filename = write_csv(results, filename=output_filename)
+        output_filename = export_to_csv(results, prefix=args.output)
 
         elapsed = time.time() - start_time
         print(f"\n{'='*60}")
