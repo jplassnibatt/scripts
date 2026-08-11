@@ -348,7 +348,7 @@ class WideHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
 def build_parser() -> argparse.ArgumentParser:
     """Build command line arguments."""
     parser = argparse.ArgumentParser(
-        description=f"Export PagerDuty user licenses to CSV v{__version__}",
+        description=f"CSE - PagerDuty License Allocation v{__version__}",
         formatter_class=WideHelpFormatter,
     )
     parser.add_argument(

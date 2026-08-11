@@ -331,7 +331,7 @@ class WideHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
 def build_parser() -> argparse.ArgumentParser:
     """Build CLI parser options."""
     parser = argparse.ArgumentParser(
-        description=f"Export resolved PagerDuty incidents with resolver info v{__version__}",
+        description=f"CSE - PagerDuty Incidents Resolved By v{__version__}",
         formatter_class=WideHelpFormatter,
     )
     parser.add_argument(

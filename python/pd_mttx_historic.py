@@ -274,7 +274,7 @@ class WideHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
 def build_parser() -> argparse.ArgumentParser:
     """Builds CLI options with explicit default, relative lookback, and custom timezone options."""
     parser = argparse.ArgumentParser(
-        description=f"Export PagerDuty Incident MTTA/MTTR Analytics Historic (FAST: 24 hours delay) to CSV v{__version__}",
+        description=f"CSE - PagerDuty Incident MTTA/MTTR Analytics Historic (FAST: 24 hours delay) v{__version__}",
         formatter_class=WideHelpFormatter,
     )
     parser.add_argument(

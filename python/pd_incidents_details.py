@@ -262,7 +262,7 @@ class WideHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
 def build_parser() -> argparse.ArgumentParser:
     """Configures command line interface options."""
     parser = argparse.ArgumentParser(
-        description=f"PagerDuty Incident Data Exporter v{__version__}",
+        description=f"CSE - PagerDuty Incidents Details v{__version__}",
         formatter_class=WideHelpFormatter,
     )
     parser.add_argument(

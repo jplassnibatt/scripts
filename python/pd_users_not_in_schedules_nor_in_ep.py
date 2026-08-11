@@ -314,7 +314,7 @@ class WideHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
 def build_parser() -> argparse.ArgumentParser:
     """Configure command line arguments."""
     parser = argparse.ArgumentParser(
-        description=f"Analyze PagerDuty user Escalation Policy and Schedule assignments v{__version__}",
+        description=f"CSE - PagerDuty Users Not in Schedules Nor in EP v{__version__}",
         formatter_class=WideHelpFormatter,
     )
     parser.add_argument(

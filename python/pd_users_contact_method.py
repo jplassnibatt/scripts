@@ -346,7 +346,7 @@ class WideHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
 def build_parser() -> argparse.ArgumentParser:
     """Configure command line arguments."""
     parser = argparse.ArgumentParser(
-        description=f"Export PagerDuty user contact methods to CSV v{__version__}",
+        description=f"CSE - PagerDuty Users Contact Method v{__version__}",
         formatter_class=WideHelpFormatter,
     )
     parser.add_argument(
