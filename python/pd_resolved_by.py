@@ -10,14 +10,14 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Dict, List, Optional
 import requests
 
-__version__ = "1.3.0"
+__version__ = "1.4.1"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
 def parse_lookback_span(span_str: str) -> timedelta:
-    """Parses dynamic lookback strings (e.g., '2d', '3w', '1m', '1y') into a timedelta."""
+    """Parses dynamic lookback strings (e.g., '2d', '3w', '1m', '1y') into a timedelta[cite: 14]."""
     match = re.match(r"^(\d+)([dwmy])$", span_str.strip().lower())
     if not match:
         raise ValueError(
@@ -40,7 +40,7 @@ def parse_lookback_span(span_str: str) -> timedelta:
 
 
 def parse_timezone(tz_str: str) -> tzinfo:
-    """Parses timezone strings into tzinfo objects (supports UTC, offsets like +05:00/-08:00, or IANA names)."""
+    """Parses timezone strings into tzinfo objects (supports UTC, offsets like +05:00/-08:00, or IANA names)[cite: 14]."""
     tz_str = tz_str.strip()
     if tz_str.upper() in ("UTC", "Z"):
         return timezone.utc
@@ -64,7 +64,7 @@ def parse_timezone(tz_str: str) -> tzinfo:
 
 
 class PagerDutyAPI:
-    """PagerDuty REST API v2 client with user caching, rate limiting, and session management."""
+    """PagerDuty REST API v2 client with user caching, rate limiting, and session management[cite: 14]."""
 
     def __init__(self, api_token: str, rate_limit: int = 8):
         if not api_token or not api_token.strip():
@@ -86,7 +86,7 @@ class PagerDutyAPI:
         )
 
     def _rate_limit(self) -> None:
-        """Enforces client-side rate limiting ($Rate = 8\\text{ req/s}$)."""
+        """Enforces client-side rate limiting ($Rate = 8\\text{ req/s}$)[cite: 14]."""
         elapsed = time.time() - self.last_request
         if elapsed < self.min_interval:
             time.sleep(self.min_interval - elapsed)
@@ -95,7 +95,7 @@ class PagerDutyAPI:
     def _request(
         self, url: str, params: Optional[Dict] = None, max_retries: int = 3
     ) -> Optional[requests.Response]:
-        """Makes an HTTP GET request with retry backoff and rate-limit handling."""
+        """Makes an HTTP GET request with retry backoff and rate-limit handling[cite: 14]."""
         for attempt in range(max_retries):
             try:
                 self._rate_limit()
@@ -141,7 +141,7 @@ class PagerDutyAPI:
         return None
 
     def get_user_details(self, user_id: str) -> Optional[Dict[str, str]]:
-        """Fetch user details with local memory caching to eliminate duplicate API requests."""
+        """Fetch user details with local memory caching to eliminate duplicate API requests[cite: 14]."""
         if user_id in self.user_cache:
             return self.user_cache[user_id]
 
@@ -157,10 +157,10 @@ class PagerDutyAPI:
         return None
 
     def get_resolved_incidents(
-        self, since: Optional[str] = None, until: Optional[str] = None, service_ids: Optional[List[str]] = None
+        self, since: Optional[str] = None, until: Optional[str] = None, service_ids: Optional[List[str]] = None, time_zone: str = "UTC"
     ) -> List[Dict]:
-        """Fetch resolved incidents using offset pagination and dynamic time windows."""
-        logger.info(f"Fetching resolved incidents from window: {since or 'Beginning'} -> {until or 'Now'}")
+        """Fetch resolved incidents natively evaluated by PagerDuty's time_zone handler[cite: 14]."""
+        logger.info(f"Fetching resolved incidents from native API window: {since or 'Beginning'} -> {until or 'Now'} (TZ: {time_zone})")
         if service_ids:
             logger.info(f"Filtering by service IDs: {', '.join(service_ids)}")
 
@@ -174,6 +174,7 @@ class PagerDutyAPI:
                 "offset": offset,
                 "limit": limit,
                 "include[]": ["users"],
+                "time_zone": time_zone, # Pass timezone natively
             }
             
             if since:
@@ -195,7 +196,8 @@ class PagerDutyAPI:
                 resolver = None
                 resolver_details = None
 
-                log_params = {"include[]": ["users"], "is_overview": "true"}
+                # Pass the target timezone into log_entries requests for native formatting
+                log_params = {"include[]": ["users"], "is_overview": "true", "time_zone": time_zone}
                 log_response = self._request(
                     f"{self.base_url}/incidents/{incident['id']}/log_entries",
                     params=log_params,
@@ -253,20 +255,23 @@ class PagerDutyAPI:
 
 
 def format_datetime(dt_str: str) -> str:
-    """Format ISO datetime string to standard UTC display format."""
+    """Formats ISO datetime string from natively localized API responses without the timezone offset[cite: 14]."""
+    if not dt_str or dt_str == "N/A":
+        return dt_str
     try:
         dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
-        return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return dt_str
 
 
 def export_to_csv(
     incidents: List[Dict],
+    time_zone: str,
     prefix: Optional[str] = None,
     default_prefix: str = "pagerduty_resolved_incidents"
 ) -> Optional[str]:
-    """Export resolved incident records to a safely versioned timestamped CSV file."""
+    """Export resolved incident records to a safely versioned timestamped CSV file[cite: 14]."""
     if not incidents:
         logger.info("No resolved incidents available to export.")
         return None
@@ -282,12 +287,15 @@ def export_to_csv(
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     filename = f"{resolved_prefix}_{timestamp}.csv"
 
+    created_at_col = f"created_at_{time_zone}"
+    resolved_at_col = f"resolved_at_{time_zone}"
+
     fieldnames = [
         "incident_number",
         "incident_id",
         "title",
-        "created_at",
-        "resolved_at",
+        created_at_col,
+        resolved_at_col,
         "resolver_name",
         "resolver_email",
         "resolver_id",
@@ -306,8 +314,8 @@ def export_to_csv(
                     "incident_number": incident.get("incident_number", "N/A"),
                     "incident_id": incident.get("incident_id", "N/A"),
                     "title": incident.get("title", "N/A"),
-                    "created_at": format_datetime(incident.get("created_at", "")),
-                    "resolved_at": format_datetime(incident.get("resolved_at", "")),
+                    created_at_col: format_datetime(incident.get("created_at", "")),
+                    resolved_at_col: format_datetime(incident.get("resolved_at", "")),
                     "resolver_name": resolver.get("name", "Unknown"),
                     "resolver_email": resolver.get("email", "Unknown"),
                     "resolver_id": resolver.get("id", "Unknown"),
@@ -322,14 +330,14 @@ def export_to_csv(
 
 
 class WideHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
-    """Custom help formatter providing extended spacing for flag alignment."""
+    """Custom help formatter providing extended spacing for flag alignment[cite: 14]."""
 
     def __init__(self, prog: str):
         super().__init__(prog, max_help_position=40, width=110)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build CLI parser options."""
+    """Build CLI parser options[cite: 14]."""
     parser = argparse.ArgumentParser(
         description=f"CSE - PagerDuty Incidents Resolved By v{__version__}",
         formatter_class=WideHelpFormatter,
@@ -341,7 +349,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-d",
         "--default",
         action="store_true",
-        help="Use default range (Last 7 days relative to exact current target timezone time)",
+        help="Use default range (Local Midnight 7 days ago -> exact moment now)",
     )
     parser.add_argument(
         "-s", "--since", help="Start date (YYYY-MM-DD or ISO 8601 string)"
@@ -359,7 +367,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--timezone",
         default="UTC",
         metavar="TZ",
-        help="Custom timezone offset or IANA name for relative lookback calculations (e.g., 'America/New_York', '-05:00', 'UTC')",
+        help="Custom timezone IANA name for relative calendar calculations (e.g., 'America/New_York', 'UTC')",
     )
     parser.add_argument(
         "--service-id",
@@ -398,27 +406,27 @@ def main() -> None:
         sys.exit(1)
 
     target_tz = parse_timezone(args.timezone)
-    until_local = datetime.now(target_tz)
+    now_local = datetime.now(target_tz)
 
     since, until = None, None
 
     if args.default:
-        since_local = until_local - timedelta(days=7)
-        since = since_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        until = until_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        logger.info(
-            f"Executing default lookback window (TZ={args.timezone}): {since} -> {until}"
-        )
+        since_local = (now_local - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+        # Snap until_local to the absolute end of the target timezone's day
+        until_local = now_local.replace(hour=23, minute=59, second=59, microsecond=0)
+
+        # Drop the Z and pass pure local strings natively to PagerDuty API
+        since = since_local.strftime("%Y-%m-%dT%H:%M:%S")
+        until = until_local.strftime("%Y-%m-%dT%H:%M:%S")
 
     elif args.lookback:
         try:
             delta = parse_lookback_span(args.lookback)
-            since_local = until_local - delta
-            since = since_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            until = until_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            logger.info(
-                f"Executing dynamic lookback span '{args.lookback}' (TZ={args.timezone}): {since} -> {until}"
-            )
+            since_local = (now_local - delta).replace(hour=0, minute=0, second=0, microsecond=0)
+            until_local = now_local.replace(hour=23, minute=59, second=59, microsecond=0)
+            
+            since = since_local.strftime("%Y-%m-%dT%H:%M:%S")
+            until = until_local.strftime("%Y-%m-%dT%H:%M:%S")
         except ValueError as e:
             logger.error(f"ERROR: {e}")
             sys.exit(1)
@@ -445,13 +453,16 @@ def main() -> None:
         api = PagerDutyAPI(api_token, rate_limit=args.rate_limit)
         start_time = time.time()
 
-        incidents = api.get_resolved_incidents(since=since, until=until, service_ids=service_ids)
+        # Pass target timezone into the incident fetcher
+        incidents = api.get_resolved_incidents(
+            since=since, until=until, service_ids=service_ids, time_zone=args.timezone
+        )
         if not incidents:
             logger.warning("No resolved incidents found matching the criteria.")
             sys.exit(0)
 
-        # Utilize safely isolated output writing
-        output_filename = export_to_csv(incidents, prefix=args.output)
+        # Utilize safely isolated output writing, explicitly passing the timezone
+        output_filename = export_to_csv(incidents, time_zone=args.timezone, prefix=args.output)
 
         elapsed = time.time() - start_time
         print(f"\n{'='*60}")

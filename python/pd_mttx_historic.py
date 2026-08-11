@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Dict, List, Optional
 import requests
 
-__version__ = "1.2.0"
+__version__ = "1.4.1"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -94,16 +94,20 @@ class PagerDutyAnalyticsExporter:
         self.last_request = time.time()
 
     def _request(
-        self, method: str, endpoint: str, json_body: Optional[Dict] = None
+        self, method: str, endpoint: str, json_body: Optional[Dict] = None, additional_headers: Optional[Dict] = None
     ) -> Optional[requests.Response]:
         """Makes an API request with rate limiting and exponential backoff retries."""
         url = f"{self.base_url}/{endpoint}"
+        
+        request_headers = self.session.headers.copy()
+        if additional_headers:
+            request_headers.update(additional_headers)
 
         for attempt in range(self.max_retries):
             try:
                 self._rate_limit()
-                response = self.session.request(
-                    method, url, json=json_body, timeout=self.timeout
+                response = requests.request(
+                    method, url, json=json_body, headers=request_headers, timeout=self.timeout
                 )
 
                 if response.status_code == 429:
@@ -147,18 +151,21 @@ class PagerDutyAnalyticsExporter:
         return False
 
     def get_analytics_incidents(
-        self, since: Optional[str] = None, until: Optional[str] = None
+        self, since: Optional[str] = None, until: Optional[str] = None, time_zone: str = "UTC"
     ) -> List[Dict]:
-        """Fetch pre-calculated incident metrics via POST /analytics/raw/incidents using cursor pagination."""
+        """Fetch pre-calculated incident metrics via POST /analytics/raw/incidents using native timezone delegation."""
         incidents = []
         limit = 1000
 
-        logger.info(f"Fetching enriched analytics data from window: {since or 'Beginning'} -> {until or 'Now'}")
+        logger.info(f"Fetching enriched analytics data from window: {since or 'Beginning'} -> {until or 'Now'} (TZ: {time_zone})")
+
+        custom_headers = {"time-zone": time_zone}
 
         body = {
             "limit": limit,
             "order": "asc",
             "order_by": "created_at",
+            "time_zone": time_zone,
             "filters": {}
         }
 
@@ -168,7 +175,7 @@ class PagerDutyAnalyticsExporter:
             body["filters"]["created_at_end"] = until
 
         while True:
-            response = self._request("POST", "analytics/raw/incidents", json_body=body)
+            response = self._request("POST", "analytics/raw/incidents", json_body=body, additional_headers=custom_headers)
             if not response:
                 logger.error("Failed to fetch analytics batch.")
                 break
@@ -198,19 +205,30 @@ def format_timedelta(total_seconds: Optional[int]) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
-def process_analytics_data(raw_incidents: List[Dict]) -> List[Dict]:
-    """Map raw analytics data to CSV columns cleanly."""
+def process_analytics_data(raw_incidents: List[Dict], time_zone: str) -> List[Dict]:
+    """Map raw analytics data to CSV columns cleanly and format localized timestamps."""
     processed = []
+    created_at_key = f"Created At_{time_zone}"
 
     for inc in raw_incidents:
         ack_users = inc.get("acknowledged_user_names") or []
         first_ack = ack_users[0] if ack_users else "No acknowledgment"
         all_acks = ", ".join(ack_users) if ack_users else "No acknowledgment"
 
+        created_at_raw = inc.get("created_at", "N/A")
+        if created_at_raw != "N/A":
+            try:
+                dt = datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
+                created_at_local = dt.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                created_at_local = created_at_raw
+        else:
+            created_at_local = "N/A"
+
         processed.append({
             "Incident ID": inc.get("id", "N/A"),
             "Title": inc.get("description", "N/A"),
-            "Created At": inc.get("created_at", "N/A"),
+            created_at_key: created_at_local,
             "Service Name": inc.get("service_name", "N/A"),
             "First Acknowledger": first_ack,
             "All Acknowledger(s)": all_acks,
@@ -224,6 +242,7 @@ def process_analytics_data(raw_incidents: List[Dict]) -> List[Dict]:
 
 def export_to_csv(
     data: List[Dict],
+    time_zone: str,
     prefix: Optional[str] = None,
     default_prefix: str = "pagerduty_analytics_metrics"
 ) -> Optional[str]:
@@ -232,21 +251,18 @@ def export_to_csv(
         logger.info("No data available to export.")
         return None
 
-    # 1. Resolve fallback hierarchy: Explicit CLI arg -> Environment Var -> Default
     resolved_prefix = prefix or os.environ.get("OUTPUT_FILE") or default_prefix
 
-    # 2. Sanitize extension if user explicitly passed `.csv`
     if resolved_prefix.endswith(".csv"):
         resolved_prefix = resolved_prefix[:-4]
 
-    # 3. Construct dynamic collision-proof timestamped filename
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     filename = f"{resolved_prefix}_{timestamp}.csv"
 
     fieldnames = [
         "Incident ID",
         "Title",
-        "Created At",
+        f"Created At_{time_zone}",
         "Service Name",
         "First Acknowledger",
         "All Acknowledger(s)",
@@ -274,7 +290,7 @@ class WideHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
 def build_parser() -> argparse.ArgumentParser:
     """Builds CLI options with explicit default, relative lookback, and custom timezone options."""
     parser = argparse.ArgumentParser(
-        description=f"CSE - PagerDuty Incident MTTA/MTTR Analytics Historic (FAST: 24 hours delay) v{__version__}",
+        description=f"CSE - PagerDuty Incident MTTA/MTTR Analytics Historic (FAST with 24 hours delay) v{__version__}",
         formatter_class=WideHelpFormatter,
     )
     parser.add_argument(
@@ -284,7 +300,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-d",
         "--default",
         action="store_true",
-        help="Use default range (Last 7 days relative to exact current target timezone time)",
+        help="Use default range (Local Midnight 7 days ago -> exact end of target timezone day)",
     )
     parser.add_argument(
         "-s", "--since", help="Start date (YYYY-MM-DD or ISO 8601 string)"
@@ -302,10 +318,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--timezone",
         default="UTC",
         metavar="TZ",
-        help="Custom timezone offset or IANA name for relative lookback calculations (e.g., 'America/New_York', '-05:00', 'UTC')",
+        help="Custom timezone IANA name for relative calendar calculations (e.g., 'America/New_York', 'UTC')",
     )
     parser.add_argument(
-        "-o", "--output", default="pagerduty_analytics_metrics", help="Output CSV filename prefix"
+        "-o", "--output", help="Output CSV filename prefix"
     )
     parser.add_argument(
         "-r",
@@ -320,7 +336,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
 
-    # Zero-argument safety guard: Display help menu automatically
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(0)
@@ -335,26 +350,30 @@ def main() -> None:
         sys.exit(1)
 
     target_tz = parse_timezone(args.timezone)
-    until_local = datetime.now(target_tz)
+    now_local = datetime.now(target_tz)
 
     since, until = None, None
 
     if args.default:
-        since_local = until_local - timedelta(days=7)
-        since = since_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        until = until_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        since_local = (now_local - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+        until_local = now_local.replace(hour=23, minute=59, second=59, microsecond=0)
+        
+        since = since_local.strftime("%Y-%m-%dT%H:%M:%S")
+        until = until_local.strftime("%Y-%m-%dT%H:%M:%S")
         logger.info(
-            f"Executing default lookback window (TZ={args.timezone}): {since} -> {until}"
+            f"Executing default calendar window (TZ={args.timezone}): {since} -> {until}"
         )
 
     elif args.lookback:
         try:
             delta = parse_lookback_span(args.lookback)
-            since_local = until_local - delta
-            since = since_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            until = until_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            since_local = (now_local - delta).replace(hour=0, minute=0, second=0, microsecond=0)
+            until_local = now_local.replace(hour=23, minute=59, second=59, microsecond=0)
+            
+            since = since_local.strftime("%Y-%m-%dT%H:%M:%S")
+            until = until_local.strftime("%Y-%m-%dT%H:%M:%S")
             logger.info(
-                f"Executing dynamic lookback span '{args.lookback}' (TZ={args.timezone}): {since} -> {until}"
+                f"Executing dynamic calendar span '{args.lookback}' (TZ={args.timezone}): {since} -> {until}"
             )
         except ValueError as e:
             logger.error(f"ERROR: {e}")
@@ -379,25 +398,24 @@ def main() -> None:
 
         start_time = time.time()
 
-        raw_incidents = exporter.get_analytics_incidents(since=since, until=until)
+        raw_incidents = exporter.get_analytics_incidents(since=since, until=until, time_zone=args.timezone)
 
         if not raw_incidents:
             logger.warning("No incidents found for the specified date range.")
             sys.exit(0)
 
-        processed_incidents = process_analytics_data(raw_incidents)
+        processed_incidents = process_analytics_data(raw_incidents, time_zone=args.timezone)
 
-        # Utilize safely isolated output writing
-        output_filename = export_to_csv(processed_incidents, prefix=args.output)
+        output_filename = export_to_csv(processed_incidents, time_zone=args.timezone, prefix=args.output)
         elapsed = time.time() - start_time
 
         print("\n" + "=" * 70)
         print("PROCESSING SUMMARY".center(70))
         print("=" * 70)
-        print(f"Time Window:         {since or 'Beginning'} -> {until or 'Now'}")
-        print(f"Incidents Processed: {len(processed_incidents)}")
-        print(f"Execution Time:      {elapsed:.2f}s")
-        print(f"Output File:         {output_filename or 'N/A'}")
+        print(f"Time Window ({args.timezone}): {since or 'Beginning'} -> {until or 'Now'}")
+        print(f"Incidents Processed:   {len(processed_incidents)}")
+        print(f"Execution Time:        {elapsed:.2f}s")
+        print(f"Output File:           {output_filename or 'N/A'}")
         print("=" * 70 + "\n")
 
     except KeyboardInterrupt:

@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Dict, List, Optional
 import requests
 
-__version__ = "1.3.0"
+__version__ = "1.4.1"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -58,13 +58,13 @@ def parse_timezone(tz_str: str) -> tzinfo:
         return ZoneInfo(tz_str)
     except Exception:
         logger.error(
-            f"Invalid timezone identifier: '{tz_str}'. Use IANA format (e.g., 'America/New_York') or offset (e.g., '-05:00', '+02:00', 'UTC')."
+            f"Invalid timezone identifier: '{tz_str}'. Use IANA format (e.g., 'America/Santiago')."
         )
         sys.exit(1)
 
 
 class PagerDutyAPI:
-    """PagerDuty REST API v2 Client for fetching alerts."""
+    """PagerDuty REST API v2 Client for fetching alerts with native timezone support."""
 
     def __init__(self, api_token: str, rate_limit: int = 8):
         if not api_token:
@@ -126,16 +126,23 @@ class PagerDutyAPI:
         return None
 
     def get_alerts(
-        self, since: Optional[str] = None, until: Optional[str] = None
+        self, since: Optional[str] = None, until: Optional[str] = None, time_zone: str = "UTC"
     ) -> List[Dict]:
-        """Fetches alerts using offset pagination checking the `more` attribute."""
-        logger.info(f"Fetching alerts from window: {since or 'Beginning'} -> {until or 'Now'}")
+        """Fetches alerts using offset pagination, natively evaluated by PagerDuty's time_zone parameter."""
+        logger.info(f"Fetching alerts from native API window: {since or 'Beginning'} -> {until or 'Now'} (TZ: {time_zone})")
         alerts = []
         offset = 0
         limit = 100
 
+        created_at_key = f"created_at_{time_zone}"
+        resolved_at_key = f"resolved_at_{time_zone}"
+
         while True:
-            params = {"offset": offset, "limit": limit}
+            params = {
+                "offset": offset,
+                "limit": limit,
+                "time_zone": time_zone,  # Pass the target timezone natively to PagerDuty API
+            }
             if since:
                 params["since"] = since
             if until:
@@ -166,8 +173,8 @@ class PagerDutyAPI:
                         "summary": alert.get("summary"),
                         "status": alert.get("status"),
                         "severity": alert.get("severity"),
-                        "created_at": format_datetime(alert.get("created_at")),
-                        "resolved_at": format_datetime(alert.get("resolved_at")),
+                        created_at_key: format_datetime(alert.get("created_at")),
+                        resolved_at_key: format_datetime(alert.get("resolved_at")),
                         "suppressed": alert.get("suppressed"),
                         "incident_id": incident.get("id"),
                         "incident_summary": incident.get("summary"),
@@ -195,7 +202,7 @@ class PagerDutyAPI:
 
 
 def format_datetime(dt_str: Optional[str]) -> str:
-    """Formats ISO datetime string to standard readable format."""
+    """Formats ISO datetime string from natively localized API responses without the timezone offset."""
     if not dt_str:
         return ""
     try:
@@ -207,6 +214,7 @@ def format_datetime(dt_str: Optional[str]) -> str:
 
 def export_to_csv(
     alerts: List[Dict],
+    time_zone: str,
     prefix: Optional[str] = None,
     default_prefix: str = "pagerduty_alerts",
 ) -> str:
@@ -225,8 +233,8 @@ def export_to_csv(
         "summary",
         "status",
         "severity",
-        "created_at",
-        "resolved_at",
+        f"created_at_{time_zone}",
+        f"resolved_at_{time_zone}",
         "suppressed",
         "incident_id",
         "incident_summary",
@@ -270,7 +278,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-d",
         "--default",
         action="store_true",
-        help="Use default range (Last 7 days relative to exact current target timezone time)",
+        help="Use default range (Local Midnight 7 days ago -> exact moment now)",
     )
     parser.add_argument(
         "-s", "--since", help="Start date (YYYY-MM-DD or ISO-8601 string)"
@@ -288,7 +296,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--timezone",
         default="UTC",
         metavar="TZ",
-        help="Custom timezone offset or IANA name for relative lookback calculations (e.g., 'America/New_York', '-05:00', 'UTC')",
+        help="Custom timezone IANA name for relative calendar calculations (e.g., 'America/Santiago', 'UTC')",
     )
     parser.add_argument(
         "-o",
@@ -326,27 +334,26 @@ def main() -> None:
         sys.exit(1)
 
     target_tz = parse_timezone(args.timezone)
-    until_local = datetime.now(target_tz)
+    now_local = datetime.now(target_tz)
 
     since, until = None, None
 
     if args.default:
-        since_local = until_local - timedelta(days=7)
-        since = since_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        until = until_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        logger.info(
-            f"Executing default lookback window (TZ={args.timezone}): {since} -> {until}"
-        )
+        since_local = (now_local - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+        until_local = now_local.replace(hour=23, minute=59, second=59, microsecond=0)
+
+        # Pass pure local strings natively to PagerDuty API
+        since = since_local.strftime("%Y-%m-%dT%H:%M:%S")
+        until = until_local.strftime("%Y-%m-%dT%H:%M:%S")
 
     elif args.lookback:
         try:
             delta = parse_lookback_span(args.lookback)
-            since_local = until_local - delta
-            since = since_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            until = until_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            logger.info(
-                f"Executing dynamic lookback span '{args.lookback}' (TZ={args.timezone}): {since} -> {until}"
-            )
+            since_local = (now_local - delta).replace(hour=0, minute=0, second=0, microsecond=0)
+            until_local = now_local.replace(hour=23, minute=59, second=59, microsecond=0)
+
+            since = since_local.strftime("%Y-%m-%dT%H:%M:%S")
+            until = until_local.strftime("%Y-%m-%dT%H:%M:%S")
         except ValueError as e:
             logger.error(f"ERROR: {e}")
             sys.exit(1)
@@ -367,8 +374,9 @@ def main() -> None:
         api = PagerDutyAPI(api_token, rate_limit=args.rate_limit)
         start_time = time.time()
 
-        alerts = api.get_alerts(since=since, until=until)
-        output_filename = export_to_csv(alerts, prefix=args.output)
+        alerts = api.get_alerts(since=since, until=until, time_zone=args.timezone)
+        
+        output_filename = export_to_csv(alerts, time_zone=args.timezone, prefix=args.output)
 
         elapsed = time.time() - start_time
         print(f"\n{'='*50}")

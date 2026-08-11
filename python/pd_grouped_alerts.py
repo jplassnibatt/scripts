@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Dict, List, Optional
 import requests
 
-__version__ = "1.3.0"
+__version__ = "1.4.1"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ def parse_timezone(tz_str: str) -> tzinfo:
         return ZoneInfo(tz_str)
     except Exception:
         logger.error(
-            f"Invalid timezone identifier: '{tz_str}'. Use IANA format (e.g., 'America/New_York') or offset (e.g., '-05:00', '+02:00', 'UTC')."
+            f"Invalid timezone identifier: '{tz_str}'. Use IANA format (e.g., 'America/Santiago')."
         )
         sys.exit(1)
 
@@ -153,8 +153,8 @@ class PagerDutyAnalyzer:
                     return None
         return None
 
-    def get_incidents_for_timerange(self, since: str, until: str) -> List[Dict]:
-        """Fetches incidents using standard offset pagination, extracting alert counts natively."""
+    def get_incidents_for_timerange(self, since: str, until: str, time_zone: str = "UTC") -> List[Dict]:
+        """Fetches incidents natively evaluated by PagerDuty's time_zone handler."""
         incidents = []
         offset = 0
         limit = 100
@@ -167,6 +167,7 @@ class PagerDutyAnalyzer:
                 "offset": offset,
                 "sort_by": "created_at:desc",
                 "total": True,
+                "time_zone": time_zone,  # Pass timezone natively
             }
 
             response = self._request(f"{self.base_url}/incidents", params=params)
@@ -184,14 +185,15 @@ class PagerDutyAnalyzer:
 
         return incidents
 
-    def get_all_incidents(self, since_date: str, until_date: str) -> List[Dict]:
-        """Handles PagerDuty's 6-month max date range constraint by chunking in UTC."""
+    def get_all_incidents(self, since_date: str, until_date: str, time_zone: str = "UTC") -> List[Dict]:
+        """Handles PagerDuty's 6-month max date range constraint using naive local boundaries."""
         all_incidents = []
 
         def parse_dt(d_str: str) -> datetime:
             if "T" in d_str:
+                # Handle localized strings without Z safely
                 return datetime.fromisoformat(d_str.replace("Z", "+00:00"))
-            return datetime.strptime(d_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            return datetime.strptime(d_str, "%Y-%m-%d")
 
         try:
             start_dt = parse_dt(since_date)
@@ -208,13 +210,14 @@ class PagerDutyAnalyzer:
                 current_start + timedelta(days=self.max_time_range_days), end_dt
             )
 
-            chunk_since = current_start.strftime("%Y-%m-%dT%H:%M:%SZ")
-            chunk_until = current_end.strftime("%Y-%m-%dT%H:%M:%SZ")
+            # Generate naive string chunks to match the API payload formatting
+            chunk_since = current_start.strftime("%Y-%m-%dT%H:%M:%S")
+            chunk_until = current_end.strftime("%Y-%m-%dT%H:%M:%S")
 
-            logger.info(f"Fetching chunk: {chunk_since} -> {chunk_until}")
+            logger.info(f"Fetching chunk: {chunk_since} -> {chunk_until} (TZ: {time_zone})")
 
             chunk_incidents = self.get_incidents_for_timerange(
-                chunk_since, chunk_until
+                chunk_since, chunk_until, time_zone
             )
             all_incidents.extend(chunk_incidents)
 
@@ -224,7 +227,7 @@ class PagerDutyAnalyzer:
         return all_incidents
 
     def analyze_incidents(self, incidents: List[Dict]) -> Dict[str, Dict]:
-        """Filters and analyzes incidents with multiple alerts natively."""
+        """Filters and analyzes incidents, extracting natively localized timestamps."""
         alert_counts = {}
         logger.info("Analyzing incidents for multiple alerts...")
 
@@ -234,11 +237,23 @@ class PagerDutyAnalyzer:
 
             if num_alerts >= 2:
                 service_data = incident.get("service") or {}
+                
+                # Natively format the offset-aware string provided by the API, stripping %z
+                created_at_raw = incident.get("created_at", "N/A")
+                if created_at_raw != "N/A":
+                    try:
+                        dt = datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
+                        created_at_local = dt.strftime("%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        created_at_local = created_at_raw
+                else:
+                    created_at_local = "N/A"
+
                 alert_counts[incident["id"]] = {
                     "alert_count": num_alerts,
                     "title": incident.get("title", "N/A"),
                     "status": incident.get("status", "N/A"),
-                    "created_at": incident.get("created_at", "N/A"),
+                    "created_at": created_at_local,
                     "urgency": incident.get("urgency", "N/A"),
                     "service": service_data.get("summary", "N/A"),
                 }
@@ -249,11 +264,12 @@ class PagerDutyAnalyzer:
         return alert_counts
 
 
-def generate_csv(
+def export_to_csv(
     alert_counts: Dict[str, Dict], 
     since: str, 
     until: str, 
     total: int,
+    time_zone: str,
     prefix: Optional[str] = None,
     default_prefix: str = "pagerduty_incident_grouped_alerts",
 ) -> str:
@@ -279,13 +295,15 @@ def generate_csv(
         writer.writerow([])
 
         writer.writerow(["DETAILS"])
+        
+        # Inject dynamic column header explicitly
         writer.writerow(
             [
                 "Incident ID",
                 "Title",
                 "Service",
                 "Status",
-                "Created At",
+                f"created_at_{time_zone}",
                 "Urgency",
                 "Number of Alerts",
             ]
@@ -330,7 +348,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-d",
         "--default",
         action="store_true",
-        help="Use default range (Last 7 days relative to exact current target timezone time)",
+        help="Use default range (Local Midnight 7 days ago -> exact moment now)",
     )
     parser.add_argument(
         "-s", "--since", help="Start date (YYYY-MM-DD or ISO-8601 string)"
@@ -348,7 +366,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--timezone",
         default="UTC",
         metavar="TZ",
-        help="Custom timezone offset or IANA name for relative lookback calculations (e.g., 'America/New_York', '-05:00', 'UTC')",
+        help="Custom timezone IANA name for relative calendar calculations (e.g., 'America/Santiago', 'UTC')",
     )
     parser.add_argument(
         "-o",
@@ -384,27 +402,27 @@ def main() -> None:
         sys.exit(1)
 
     target_tz = parse_timezone(args.timezone)
-    until_local = datetime.now(target_tz)
+    now_local = datetime.now(target_tz)
 
     since, until = None, None
 
     if args.default:
-        since_local = until_local - timedelta(days=7)
-        since = since_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        until = until_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        logger.info(
-            f"Executing default lookback window (TZ={args.timezone}): {since} -> {until}"
-        )
+        since_local = (now_local - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+        # Snap until_local to the absolute end of the target timezone's day
+        until_local = now_local.replace(hour=23, minute=59, second=59, microsecond=0)
+
+        # Drop the Z and pass pure local strings natively to PagerDuty
+        since = since_local.strftime("%Y-%m-%dT%H:%M:%S")
+        until = until_local.strftime("%Y-%m-%dT%H:%M:%S")
 
     elif args.lookback:
         try:
             delta = parse_lookback_span(args.lookback)
-            since_local = until_local - delta
-            since = since_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            until = until_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            logger.info(
-                f"Executing dynamic lookback span '{args.lookback}' (TZ={args.timezone}): {since} -> {until}"
-            )
+            since_local = (now_local - delta).replace(hour=0, minute=0, second=0, microsecond=0)
+            until_local = now_local.replace(hour=23, minute=59, second=59, microsecond=0)
+            
+            since = since_local.strftime("%Y-%m-%dT%H:%M:%S")
+            until = until_local.strftime("%Y-%m-%dT%H:%M:%S")
         except ValueError as e:
             logger.error(f"ERROR: {e}")
             sys.exit(1)
@@ -425,17 +443,19 @@ def main() -> None:
         analyzer = PagerDutyAnalyzer(api_token, rate_limit=args.rate_limit)
         start_time = time.time()
 
-        incidents = analyzer.get_all_incidents(since, until)
+        # Pass target timezone into the chunking mechanism
+        incidents = analyzer.get_all_incidents(since, until, time_zone=args.timezone)
         if not incidents:
             logger.warning("No incidents found in the specified time range.")
             sys.exit(0)
 
         alert_counts = analyzer.analyze_incidents(incidents)
-        output_filename = generate_csv(
+        output_filename = export_to_csv(
             alert_counts, 
             since=since, 
             until=until, 
             total=len(incidents), 
+            time_zone=args.timezone,
             prefix=args.output
         )
 

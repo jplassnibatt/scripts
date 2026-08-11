@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any, Dict, List, Optional
 import requests
 
-__version__ = "1.4.0"
+__version__ = "1.5.3"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ def parse_timezone(tz_str: str) -> tzinfo:
         return ZoneInfo(tz_str)
     except Exception:
         logger.error(
-            f"Invalid timezone identifier: '{tz_str}'. Use IANA format (e.g., 'America/New_York') or offset (e.g., '-05:00', '+02:00', 'UTC')."
+            f"Invalid timezone identifier: '{tz_str}'. Use IANA format (e.g., 'America/New_York', 'UTC')."
         )
         sys.exit(1)
 
@@ -155,15 +155,27 @@ class PagerDutyAPI:
         return resolved_ids
 
     def fetch_resolved_incidents(
-        self, since: str, until: str, service_ids: Optional[List[str]] = None
+        self, since: str, until: str, service_ids: Optional[List[str]] = None, time_zone: str = "UTC"
     ) -> List[Dict[str, Any]]:
         """
         Fetches resolved incidents using 6-month chunking to bypass PagerDuty's
-        maximum date range limits on the /incidents endpoint.
+        maximum date range limits on the /incidents endpoint natively evaluated by time_zone[cite: 16].
         """
         all_incidents = []
-        start_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
-        end_dt = datetime.fromisoformat(until.replace("Z", "+00:00"))
+        
+        def parse_dt(d_str: str) -> datetime:
+            if "T" in d_str:
+                return datetime.fromisoformat(d_str.replace("Z", "+00:00"))
+            return datetime.strptime(d_str, "%Y-%m-%d")
+
+        try:
+            start_dt = parse_dt(since)
+            end_dt = parse_dt(until)
+        except ValueError:
+            logger.error(
+                f"Invalid date format: {since} or {until}. Use YYYY-MM-DD or ISO-8601."
+            )
+            sys.exit(1)
 
         if start_dt > end_dt:
             logger.error("Start date must be before end date.")
@@ -172,18 +184,21 @@ class PagerDutyAPI:
         chunk_start = start_dt
         while chunk_start < end_dt:
             chunk_end = min(chunk_start + timedelta(days=180), end_dt)
+            
+            chunk_since = chunk_start.strftime("%Y-%m-%dT%H:%M:%S")
+            chunk_until = chunk_end.strftime("%Y-%m-%dT%H:%M:%S")
+            
             logger.info(
-                f"Fetching chunk: {chunk_start.strftime('%Y-%m-%dT%H:%M:%SZ')} -> "
-                f"{chunk_end.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+                f"Fetching chunk: {chunk_since} -> {chunk_until} (TZ: {time_zone})"
             )
 
             offset = 0
             limit = 100
             params = {
-                "since": chunk_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "until": chunk_end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "since": chunk_since,
+                "until": chunk_until,
                 "statuses[]": ["resolved"],
-                "time_zone": "UTC",
+                "time_zone": time_zone,  # Pass timezone natively
             }
             if service_ids:
                 params["service_ids[]"] = service_ids
@@ -254,6 +269,7 @@ class MTTRAnalyzer:
             if not created_str or not resolved_str:
                 continue
 
+            # Safely parses native offset-aware strings returned natively by the API
             created_at = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
             resolved_at = datetime.fromisoformat(resolved_str.replace("Z", "+00:00"))
             resolution_times.append((resolved_at - created_at).total_seconds())
@@ -296,10 +312,11 @@ def export_to_csv(
     mttr_stats: Dict[str, Dict], 
     since: str, 
     until: str, 
+    time_zone: str,
     prefix: Optional[str] = None, 
     default_prefix: str = "pagerduty_mttr_analysis"
 ) -> str:
-    """Exports structured MTTR statistics to a safely versioned timestamped CSV."""
+    """Exports structured MTTR statistics to a safely versioned timestamped CSV[cite: 16]."""
     # 1. Resolve fallback hierarchy: Explicit CLI arg -> Environment Var -> Default
     resolved_prefix = prefix or os.environ.get("OUTPUT_FILE") or default_prefix
 
@@ -323,7 +340,12 @@ def export_to_csv(
     ]
 
     rows = []
-    for service_name, stats in mttr_stats.items():
+    
+    # Sort alphabetically by service name, appending "Overall Pipeline" at the very bottom
+    for service_name, stats in sorted(
+        mttr_stats.items(), 
+        key=lambda x: (1, "") if x[0] == "Overall Pipeline" else (0, x[0].lower())
+    ):
         rows.append(
             {
                 "Service": service_name,
@@ -340,7 +362,10 @@ def export_to_csv(
     with open(filename, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(["PagerDuty MTTR Analysis Report"])
-        writer.writerow([f"Period UTC: {since} to {until}"])
+        # Format strings to separate date and time with a space instead of a T for CSV legibility
+        display_since = since.replace("T", " ")
+        display_until = until.replace("T", " ")
+        writer.writerow([f"Period ({time_zone}): {display_since} to {display_until}"])
         writer.writerow([]) 
 
         dict_writer = csv.DictWriter(csvfile, fieldnames=headers)
@@ -361,7 +386,7 @@ class WideHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
 def build_parser() -> argparse.ArgumentParser:
     """Builds CLI options with explicit default, relative lookback, and custom timezone options."""
     parser = argparse.ArgumentParser(
-        description=f"CSE - PagerDuty MTTR per Service Analyzer v{__version__}",
+        description=f"PagerDuty MTTR Analyzer v{__version__}",
         formatter_class=WideHelpFormatter,
     )
     parser.add_argument(
@@ -389,7 +414,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--timezone",
         default="UTC",
         metavar="TZ",
-        help="Custom timezone offset or IANA name for relative lookback calculations (e.g., 'America/New_York', '-05:00', 'UTC')",
+        help="Custom timezone IANA name for relative calendar calculations (e.g., 'America/New_York', 'UTC')",
     )
     parser.add_argument(
         "-S",
@@ -398,7 +423,7 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         help="Space-separated list of Service Names (in quotes if they contain spaces) OR Service IDs to filter by",
     )
-    parser.add_argument("-o", "--output", default="pagerduty_mttr_analysis", help="Custom CSV filename prefix")
+    parser.add_argument("-o", "--output", help="Custom CSV filename prefix")
     return parser
 
 
@@ -420,27 +445,26 @@ def main() -> None:
         sys.exit(1)
 
     target_tz = parse_timezone(args.timezone)
-    until_local = datetime.now(target_tz)
+    now_local = datetime.now(target_tz)
 
     since, until = None, None
 
     if args.default:
-        since_local = until_local - timedelta(days=7)
-        since = since_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        until = until_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        logger.info(
-            f"Executing default lookback window (TZ={args.timezone}): {since} -> {until}"
-        )
+        since_local = now_local - timedelta(days=7)
+        until_local = now_local
+
+        # Drop the Z and pass pure local strings natively to PagerDuty API
+        since = since_local.strftime("%Y-%m-%dT%H:%M:%S")
+        until = until_local.strftime("%Y-%m-%dT%H:%M:%S")
 
     elif args.lookback:
         try:
             delta = parse_lookback_span(args.lookback)
-            since_local = until_local - delta
-            since = since_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            until = until_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            logger.info(
-                f"Executing dynamic lookback span '{args.lookback}' (TZ={args.timezone}): {since} -> {until}"
-            )
+            since_local = now_local - delta
+            until_local = now_local
+            
+            since = since_local.strftime("%Y-%m-%dT%H:%M:%S")
+            until = until_local.strftime("%Y-%m-%dT%H:%M:%S")
         except ValueError as e:
             logger.error(f"ERROR: {e}")
             sys.exit(1)
@@ -469,7 +493,7 @@ def main() -> None:
                 sys.exit(1)
 
         incidents = api.fetch_resolved_incidents(
-            since=since, until=until, service_ids=resolved_service_ids
+            since=since, until=until, service_ids=resolved_service_ids, time_zone=args.timezone
         )
         
         if not incidents:
@@ -477,7 +501,7 @@ def main() -> None:
         else:
             logger.info("Calculating MTTR statistics...")
             mttr_stats = MTTRAnalyzer.analyze_by_service(incidents)
-            output_filename = export_to_csv(mttr_stats, since, until, prefix=args.output)
+            output_filename = export_to_csv(mttr_stats, since, until, args.timezone, prefix=args.output)
 
         elapsed = time.time() - start_time
         print(f"\n{'='*50}")
