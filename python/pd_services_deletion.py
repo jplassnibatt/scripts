@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
 import requests
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -222,12 +222,18 @@ def export_report_csv(
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     filename = f"{resolved_prefix}_{timestamp}.csv"
     
-    fieldnames = ["id", "name", "status"]
+    fieldnames = ["Service ID", "Service Name", "Status"]
 
     with open(filename, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(results)
+        for row in results:
+            mapped_row = {
+                "Service ID": row.get("id"),
+                "Service Name": row.get("name"),
+                "Status": row.get("status"),
+            }
+            writer.writerow(mapped_row)
 
     logger.info(f"✓ Deletion execution report saved to '{filename}'")
     return filename
@@ -258,7 +264,6 @@ def build_parser() -> argparse.ArgumentParser:
         "-i", "--interactive", action="store_true", help="Interactively fetch and select services from PagerDuty"
     )
 
-    # Added decoupled output argument to align with script architecture standards
     parser.add_argument(
         "-o", "--output", default="pagerduty_service_deletion", help="Custom CSV output filename prefix for the deletion report"
     )
@@ -274,7 +279,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
 
-    # Zero-argument safety guard: Display help menu automatically
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(0)
@@ -288,7 +292,6 @@ def main() -> None:
 
     deleter = PagerDutyServiceDeleter(api_token)
 
-    # Acquire target services list
     if args.file:
         targets = read_services_from_csv(args.file)
     else:
@@ -299,7 +302,6 @@ def main() -> None:
         logger.info("No services selected for deletion. Exiting.")
         sys.exit(0)
 
-    # Dry run / Confirmation display
     print("\n" + "=" * 80)
     print(f"TARGET SERVICES FOR DELETION ({len(targets)} total):")
     print("=" * 80)
@@ -323,7 +325,6 @@ def main() -> None:
 
     elapsed_time = time.time() - start_time
     
-    # Utilize safely isolated output writing
     output_filename = export_report_csv(results, prefix=args.output)
 
     successful = sum(1 for r in results if r["status"] == "Deleted")

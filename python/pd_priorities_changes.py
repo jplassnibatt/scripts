@@ -13,14 +13,14 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any, Dict, List, Optional
 import requests
 
-__version__ = "1.4.1"
+__version__ = "1.4.2"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
 def parse_lookback_span(span_str: str) -> timedelta:
-    """Parses dynamic lookback strings (e.g., '2d', '3w', '1m', '1y') into a timedelta."""
+    """Parses dynamic lookback strings (e.g., '2d', '3w', '1m', '1y') into a timedelta[cite: 13]."""
     match = re.match(r"^(\d+)([dwmy])$", span_str.strip().lower())
     if not match:
         raise ValueError(
@@ -43,7 +43,7 @@ def parse_lookback_span(span_str: str) -> timedelta:
 
 
 def parse_timezone(tz_str: str) -> tzinfo:
-    """Parses timezone strings into tzinfo objects (supports UTC, offsets like +05:00/-08:00, or IANA names)."""
+    """Parses timezone strings into tzinfo objects (supports UTC, offsets like +05:00/-08:00, or IANA names)[cite: 13]."""
     tz_str = tz_str.strip()
     if tz_str.upper() in ("UTC", "Z"):
         return timezone.utc
@@ -82,7 +82,7 @@ class PriorityChange:
 
 
 class PagerDutyAPI:
-    """PagerDuty REST API v2 Client with thread-safe rate limiting."""
+    """PagerDuty REST API v2 Client with thread-safe rate limiting[cite: 13, 14]."""
 
     def __init__(self, api_token: str, rate_limit: int = 8):
         if not api_token:
@@ -104,7 +104,7 @@ class PagerDutyAPI:
         )
 
     def _rate_limit(self) -> None:
-        """Enforces thread-safe client-side rate limiting ($Rate = 8\\text{ req/s}$)."""
+        """Enforces thread-safe client-side rate limiting ($Rate = 8\\text{ req/s}$)[cite: 13, 14]."""
         with self.lock:
             elapsed = time.time() - self.last_request
             if elapsed < self.min_interval:
@@ -114,7 +114,7 @@ class PagerDutyAPI:
     def _request(
         self, url: str, params: Optional[dict] = None, max_retries: int = 3
     ) -> Optional[requests.Response]:
-        """Makes an HTTP GET request with retry backoff."""
+        """Makes an HTTP GET request with retry backoff[cite: 13, 14]."""
         for attempt in range(max_retries):
             try:
                 self._rate_limit()
@@ -148,7 +148,7 @@ class PagerDutyAPI:
     def fetch_paginated_data(
         self, url: str, key: str, params: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
-        """Generic pagination fetcher checking offset/more metadata."""
+        """Generic pagination fetcher checking offset/more metadata[cite: 13, 14]."""
         all_data = []
         offset = 0
         limit = 100
@@ -181,7 +181,7 @@ class PagerDutyAPI:
     def fetch_resolved_incidents(
         self, since: Optional[str] = None, until: Optional[str] = None, time_zone: str = "UTC"
     ) -> List[Dict[str, Any]]:
-        """Fetches resolved incidents using natively evaluated timezone windows."""
+        """Fetches resolved incidents using natively evaluated timezone windows[cite: 13]."""
         logger.info(
             f"Fetching resolved incidents: {since or 'Beginning'} -> {until or 'Now'} (TZ: {time_zone})"
         )
@@ -198,7 +198,7 @@ class PagerDutyAPI:
         return incidents
 
     def fetch_log_entries(self, incident_id: str, time_zone: str = "UTC") -> List[Dict[str, Any]]:
-        """Fetches log entries for a single incident natively offset to target timezone."""
+        """Fetches log entries for a single incident natively offset to target timezone[cite: 13]."""
         return self.fetch_paginated_data(
             f"{self.base_url}/incidents/{incident_id}/log_entries",
             key="log_entries",
@@ -207,7 +207,7 @@ class PagerDutyAPI:
 
 
 class PriorityAnalyzer:
-    """Analyzes log entries for incident priority shifts and metrics."""
+    """Analyzes log entries for incident priority shifts and metrics[cite: 13]."""
 
     @staticmethod
     def safe_get(dictionary: Dict[str, Any], *keys: str) -> Any:
@@ -287,6 +287,7 @@ class PriorityAnalyzer:
     def process_incident(
         cls, api: PagerDutyAPI, incident: Dict[str, Any], time_zone: str = "UTC"
     ) -> List[PriorityChange]:
+        target_tz = parse_timezone(time_zone)
         log_entries = sorted(
             api.fetch_log_entries(incident["id"], time_zone=time_zone),
             key=lambda x: x.get("created_at", ""),
@@ -327,13 +328,24 @@ class PriorityAnalyzer:
                         else "No"
                     )
                     
-                    # Natively format the offset-aware string provided by the API and drop %z
+                    # Natively format the offset-aware string provided by the API and embed colonized %z offset
                     created_at_raw = entry.get("created_at", "")
-                    try:
-                        dt = datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
-                        created_at_local = dt.strftime("%Y-%m-%d %H:%M:%S")
-                    except Exception:
-                        created_at_local = created_at_raw
+                    if created_at_raw:
+                        try:
+                            dt = datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
+                            if dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=target_tz)
+                            else:
+                                dt = dt.astimezone(target_tz)
+
+                            formatted = dt.strftime("%Y-%m-%d %H:%M:%S %z")
+                            if len(formatted) > 5 and formatted[-5] in ('+', '-'):
+                                formatted = formatted[:-2] + ":" + formatted[-2:]
+                            created_at_local = formatted
+                        except Exception:
+                            created_at_local = created_at_raw
+                    else:
+                        created_at_local = ""
 
                     priority_changes.append(
                         PriorityChange(
@@ -357,7 +369,7 @@ class PriorityAnalyzer:
 def process_incidents_concurrently(
     api: PagerDutyAPI, incidents: List[Dict[str, Any]], time_zone: str = "UTC", max_workers: int = 5
 ) -> List[PriorityChange]:
-    """Processes incidents concurrently to fetch log entries efficiently."""
+    """Processes incidents concurrently to fetch log entries efficiently[cite: 13]."""
     changes = []
     total = len(incidents)
     if total == 0:
@@ -385,11 +397,10 @@ def process_incidents_concurrently(
 
 def export_to_csv(
     priority_changes: List[PriorityChange],
-    time_zone: str,
     prefix: Optional[str] = None,
     default_prefix: str = "pagerduty_priority_changes",
 ) -> str:
-    """Exports list of PriorityChange objects to a safely versioned timestamped CSV format."""
+    """Exports list of PriorityChange objects to a safely versioned timestamped CSV format[cite: 13, 14]."""
     resolved_prefix = prefix or os.environ.get("OUTPUT_FILE") or default_prefix
 
     if resolved_prefix.endswith(".csv"):
@@ -398,21 +409,19 @@ def export_to_csv(
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     filename = f"{resolved_prefix}_{timestamp}.csv"
 
-    # Define the dynamic column header name
-    dynamic_time_col = f"time of change_{time_zone}"
-
+    # Define static, human-readable column headers for robust downstream parsing
     fieldnames = [
-        "incident_id",
-        "old_priority",
-        "new_priority",
-        "changed_by",
-        dynamic_time_col,
-        "incident_summary",
-        "acknowledgers",
-        "incident_url",
-        "de_escalation",
-        "mtta",
-        "mttr",
+        "Incident ID",
+        "Old Priority",
+        "New Priority",
+        "Changed By",
+        "Time of Change",
+        "Incident Summary",
+        "Acknowledgers",
+        "Incident URL",
+        "De-escalation",
+        "MTTA",
+        "MTTR",
     ]
 
     with open(filename, "w", newline="", encoding="utf-8") as f:
@@ -420,24 +429,35 @@ def export_to_csv(
         writer.writeheader()
         if priority_changes:
             for change in priority_changes:
-                # Convert the dataclass to a dictionary and remap the internal timestamp key
                 row = asdict(change)
-                row[dynamic_time_col] = row.pop("timestamp")
-                writer.writerow(row)
+                mapped_row = {
+                    "Incident ID": row.get("incident_id"),
+                    "Old Priority": row.get("old_priority"),
+                    "New Priority": row.get("new_priority"),
+                    "Changed By": row.get("changed_by"),
+                    "Time of Change": row.get("timestamp"),
+                    "Incident Summary": row.get("incident_summary"),
+                    "Acknowledgers": row.get("acknowledgers"),
+                    "Incident URL": row.get("incident_url"),
+                    "De-escalation": row.get("de_escalation"),
+                    "MTTA": row.get("mtta"),
+                    "MTTR": row.get("mttr"),
+                }
+                writer.writerow(mapped_row)
 
     logger.info(f"✓ CSV output saved to '{filename}'")
     return filename
 
 
 class WideHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
-    """Custom help formatter providing extended spacing for flag alignment."""
+    """Custom help formatter providing extended spacing for flag alignment[cite: 13]."""
 
     def __init__(self, prog: str):
         super().__init__(prog, max_help_position=40, width=110)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Builds CLI options with explicit default, relative lookback, and custom timezone options."""
+    """Builds CLI options with explicit default, relative lookback, and custom timezone options[cite: 13]."""
     parser = argparse.ArgumentParser(
         description=f"PagerDuty Priority Changes Exporter v{__version__}",
         formatter_class=WideHelpFormatter,
@@ -510,10 +530,8 @@ def main() -> None:
 
     if args.default:
         since_local = (now_local - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
-        # Snap until_local to the absolute end of the target timezone's day
         until_local = now_local.replace(hour=23, minute=59, second=59, microsecond=0)
 
-        # Drop the Z and pass pure local strings natively to PagerDuty API
         since = since_local.strftime("%Y-%m-%dT%H:%M:%S")
         until = until_local.strftime("%Y-%m-%dT%H:%M:%S")
 
@@ -545,17 +563,13 @@ def main() -> None:
         api = PagerDutyAPI(api_token, rate_limit=args.rate_limit)
         start_time = time.time()
 
-        # Pass target timezone into the incident fetcher
         resolved_incidents = api.fetch_resolved_incidents(since=since, until=until, time_zone=args.timezone)
         
-        # Pass the target timezone into the worker threads so logs are evaluated natively
         priority_changes = process_incidents_concurrently(api, resolved_incidents, time_zone=args.timezone)
 
-        # Sort priority changes descending by timestamp
         priority_changes.sort(key=lambda x: x.timestamp, reverse=True)
 
-        # Utilize safely isolated output writing, explicitly passing the timezone
-        output_filename = export_to_csv(priority_changes, time_zone=args.timezone, prefix=args.output)
+        output_filename = export_to_csv(priority_changes, prefix=args.output)
 
         elapsed = time.time() - start_time
         print(f"\n{'='*50}")

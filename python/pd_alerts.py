@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Dict, List, Optional
 import requests
 
-__version__ = "1.4.1"
+__version__ = "1.4.2"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -134,14 +134,11 @@ class PagerDutyAPI:
         offset = 0
         limit = 100
 
-        created_at_key = f"created_at_{time_zone}"
-        resolved_at_key = f"resolved_at_{time_zone}"
-
         while True:
             params = {
                 "offset": offset,
                 "limit": limit,
-                "time_zone": time_zone,  # Pass the target timezone natively to PagerDuty API
+                "time_zone": time_zone,
             }
             if since:
                 params["since"] = since
@@ -173,8 +170,8 @@ class PagerDutyAPI:
                         "summary": alert.get("summary"),
                         "status": alert.get("status"),
                         "severity": alert.get("severity"),
-                        created_at_key: format_datetime(alert.get("created_at")),
-                        resolved_at_key: format_datetime(alert.get("resolved_at")),
+                        "created_at": format_datetime(alert.get("created_at")),
+                        "resolved_at": format_datetime(alert.get("resolved_at")),
                         "suppressed": alert.get("suppressed"),
                         "incident_id": incident.get("id"),
                         "incident_summary": incident.get("summary"),
@@ -202,19 +199,23 @@ class PagerDutyAPI:
 
 
 def format_datetime(dt_str: Optional[str]) -> str:
-    """Formats ISO datetime string from natively localized API responses without the timezone offset."""
+    """Formats ISO datetime string from natively localized API responses with a colonized offset."""
     if not dt_str:
         return ""
     try:
         dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
+        
+        formatted = dt.strftime("%Y-%m-%d %H:%M:%S %z")
+        if len(formatted) > 5 and formatted[-5] in ('+', '-'):
+            formatted = formatted[:-2] + ":" + formatted[-2:]
+            
+        return formatted
     except Exception:
         return dt_str
 
 
 def export_to_csv(
     alerts: List[Dict],
-    time_zone: str,
     prefix: Optional[str] = None,
     default_prefix: str = "pagerduty_alerts",
 ) -> str:
@@ -224,35 +225,59 @@ def export_to_csv(
     if resolved_prefix.endswith(".csv"):
         resolved_prefix = resolved_prefix[:-4]
 
+    # Construct dynamic collision-proof timestamped filename strictly following prefix_YYYYMMDD-HHMMSS.csv
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     filename = f"{resolved_prefix}_{timestamp}.csv"
 
+    # Use human-readable static column headers for robust downstream parsing
     fieldnames = [
-        "alert_id",
-        "alert_key",
-        "summary",
-        "status",
-        "severity",
-        f"created_at_{time_zone}",
-        f"resolved_at_{time_zone}",
-        "suppressed",
-        "incident_id",
-        "incident_summary",
-        "service_id",
-        "service_name",
-        "source_origin",
-        "source_component",
-        "event_class",
-        "service_group",
-        "details",
-        "html_url",
+        "Alert ID",
+        "Alert Key",
+        "Alert Summary",
+        "Status",
+        "Severity",
+        "Created At",
+        "Resolved At",
+        "Suppressed",
+        "Incident ID",
+        "Incident Summary",
+        "Service ID",
+        "Service Name",
+        "Source Origin",
+        "Source Component",
+        "Event Class",
+        "Service Group",
+        "Details",
+        "HTML URL",
     ]
 
     with open(filename, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
+        
         if alerts:
-            writer.writerows(alerts)
+            for alert in alerts:
+                mapped_row = {
+                    "Alert ID": alert.get("alert_id"),
+                    "Alert Key": alert.get("alert_key"),
+                    "Alert Summary": alert.get("summary"),
+                    "Status": alert.get("status"),
+                    "Severity": alert.get("severity"),
+                    "Created At": alert.get("created_at"),
+                    "Resolved At": alert.get("resolved_at"),
+                    "Suppressed": alert.get("suppressed"),
+                    "Incident ID": alert.get("incident_id"),
+                    "Incident Summary": alert.get("incident_summary"),
+                    "Service ID": alert.get("service_id"),
+                    "Service Name": alert.get("service_name"),
+                    "Source Origin": alert.get("source_origin"),
+                    "Source Component": alert.get("source_component"),
+                    "Event Class": alert.get("event_class"),
+                    "Service Group": alert.get("service_group"),
+                    "Details": alert.get("details"),
+                    "HTML URL": alert.get("html_url"),
+                }
+                writer.writerow(mapped_row)
 
     logger.info(f"✓ CSV report saved to '{filename}'")
     return filename
@@ -317,7 +342,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
 
-    # Automatically show help and exit if no CLI arguments are supplied
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(0)
@@ -342,7 +366,6 @@ def main() -> None:
         since_local = (now_local - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
         until_local = now_local.replace(hour=23, minute=59, second=59, microsecond=0)
 
-        # Pass pure local strings natively to PagerDuty API
         since = since_local.strftime("%Y-%m-%dT%H:%M:%S")
         until = until_local.strftime("%Y-%m-%dT%H:%M:%S")
 
@@ -376,7 +399,7 @@ def main() -> None:
 
         alerts = api.get_alerts(since=since, until=until, time_zone=args.timezone)
         
-        output_filename = export_to_csv(alerts, time_zone=args.timezone, prefix=args.output)
+        output_filename = export_to_csv(alerts, prefix=args.output)
 
         elapsed = time.time() - start_time
         print(f"\n{'='*50}")

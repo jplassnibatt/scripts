@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Dict, List, Optional
 import requests
 
-__version__ = "1.4.1"
+__version__ = "1.4.3"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -87,7 +87,7 @@ class PagerDutyAnalyticsExporter:
         )
 
     def _rate_limit(self) -> None:
-        """Enforces basic client-side rate limiting."""
+        """Enforces basic client-side rate limiting ($Rate = 4\\text{ req/s}$)."""
         elapsed = time.time() - self.last_request
         if elapsed < self.min_interval:
             time.sleep(self.min_interval - elapsed)
@@ -205,10 +205,9 @@ def format_timedelta(total_seconds: Optional[int]) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
-def process_analytics_data(raw_incidents: List[Dict], time_zone: str) -> List[Dict]:
+def process_analytics_data(raw_incidents: List[Dict], target_tz: tzinfo) -> List[Dict]:
     """Map raw analytics data to CSV columns cleanly and format localized timestamps."""
     processed = []
-    created_at_key = f"Created At_{time_zone}"
 
     for inc in raw_incidents:
         ack_users = inc.get("acknowledged_user_names") or []
@@ -219,7 +218,20 @@ def process_analytics_data(raw_incidents: List[Dict], time_zone: str) -> List[Di
         if created_at_raw != "N/A":
             try:
                 dt = datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
-                created_at_local = dt.strftime("%Y-%m-%d %H:%M:%S")
+                
+                # The Analytics API natively localizes timestamps but strips the offset making them "naive"[cite: 14]
+                # We attach the target_tz explicitly so %z can properly format the timezone offset
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=target_tz)
+                else:
+                    dt = dt.astimezone(target_tz)
+
+                formatted = dt.strftime("%Y-%m-%d %H:%M:%S %z")
+                
+                # Inject the colon into the %z output (e.g., -0400 -> -04:00)
+                if len(formatted) > 5 and formatted[-5] in ('+', '-'):
+                    formatted = formatted[:-2] + ":" + formatted[-2:]
+                created_at_local = formatted.strip()
             except Exception:
                 created_at_local = created_at_raw
         else:
@@ -227,8 +239,8 @@ def process_analytics_data(raw_incidents: List[Dict], time_zone: str) -> List[Di
 
         processed.append({
             "Incident ID": inc.get("id", "N/A"),
-            "Title": inc.get("description", "N/A"),
-            created_at_key: created_at_local,
+            "Incident Title": inc.get("description", "N/A"),
+            "Created At": created_at_local,
             "Service Name": inc.get("service_name", "N/A"),
             "First Acknowledger": first_ack,
             "All Acknowledger(s)": all_acks,
@@ -242,11 +254,10 @@ def process_analytics_data(raw_incidents: List[Dict], time_zone: str) -> List[Di
 
 def export_to_csv(
     data: List[Dict],
-    time_zone: str,
     prefix: Optional[str] = None,
     default_prefix: str = "pagerduty_analytics_metrics"
 ) -> Optional[str]:
-    """Exports processed incident metrics to a safely versioned timestamped CSV file."""
+    """Exports processed incident metrics to a safely versioned timestamped CSV file[cite: 14, 15]."""
     if not data:
         logger.info("No data available to export.")
         return None
@@ -261,8 +272,8 @@ def export_to_csv(
 
     fieldnames = [
         "Incident ID",
-        "Title",
-        f"Created At_{time_zone}",
+        "Incident Title",
+        "Created At",
         "Service Name",
         "First Acknowledger",
         "All Acknowledger(s)",
@@ -300,7 +311,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-d",
         "--default",
         action="store_true",
-        help="Use default range (Local Midnight 7 days ago -> exact end of target timezone day)",
+        help="Use default range (Last 7 days relative to exact current moment)",
     )
     parser.add_argument(
         "-s", "--since", help="Start date (YYYY-MM-DD or ISO 8601 string)"
@@ -355,25 +366,25 @@ def main() -> None:
     since, until = None, None
 
     if args.default:
-        since_local = (now_local - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
-        until_local = now_local.replace(hour=23, minute=59, second=59, microsecond=0)
+        since_local = now_local - timedelta(days=7)
+        until_local = now_local
         
         since = since_local.strftime("%Y-%m-%dT%H:%M:%S")
         until = until_local.strftime("%Y-%m-%dT%H:%M:%S")
         logger.info(
-            f"Executing default calendar window (TZ={args.timezone}): {since} -> {until}"
+            f"Executing default time window (TZ={args.timezone}): {since} -> {until}"
         )
 
     elif args.lookback:
         try:
             delta = parse_lookback_span(args.lookback)
-            since_local = (now_local - delta).replace(hour=0, minute=0, second=0, microsecond=0)
-            until_local = now_local.replace(hour=23, minute=59, second=59, microsecond=0)
+            since_local = now_local - delta
+            until_local = now_local
             
             since = since_local.strftime("%Y-%m-%dT%H:%M:%S")
             until = until_local.strftime("%Y-%m-%dT%H:%M:%S")
             logger.info(
-                f"Executing dynamic calendar span '{args.lookback}' (TZ={args.timezone}): {since} -> {until}"
+                f"Executing dynamic time span '{args.lookback}' (TZ={args.timezone}): {since} -> {until}"
             )
         except ValueError as e:
             logger.error(f"ERROR: {e}")
@@ -404,9 +415,9 @@ def main() -> None:
             logger.warning("No incidents found for the specified date range.")
             sys.exit(0)
 
-        processed_incidents = process_analytics_data(raw_incidents, time_zone=args.timezone)
+        processed_incidents = process_analytics_data(raw_incidents, target_tz=target_tz)
 
-        output_filename = export_to_csv(processed_incidents, time_zone=args.timezone, prefix=args.output)
+        output_filename = export_to_csv(processed_incidents, prefix=args.output)
         elapsed = time.time() - start_time
 
         print("\n" + "=" * 70)

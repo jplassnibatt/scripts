@@ -270,9 +270,9 @@ def export_to_csv(
     filename = f"{resolved_prefix}_{timestamp}.csv"
 
     fieldnames = [
-        "Name",
-        "Email",
-        "Role",
+        "User Name",
+        "User Email",
+        "User Role",
         "Has EPs",
         "Escalation Policies",
         "Has Schedules",
@@ -286,9 +286,9 @@ def export_to_csv(
         for user in results:
             writer.writerow(
                 {
-                    "Name": user.get("name", "N/A"),
-                    "Email": user.get("email", "N/A"),
-                    "Role": user.get("role", "N/A"),
+                    "User Name": user.get("name", "N/A"),
+                    "User Email": user.get("email", "N/A"),
+                    "User Role": user.get("role", "N/A"),
                     "Has EPs": "Yes" if user.get("policies") else "No",
                     "Escalation Policies": "; ".join(
                         [p["name"] for p in user.get("policies", [])]
@@ -345,11 +345,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     parser = build_parser()
-
-    # Zero-argument safety guard: Display help menu automatically
-    if len(sys.argv) == 1:
-        parser.print_help()
-        sys.exit(0)
 
     args = parser.parse_args()
 

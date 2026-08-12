@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 import requests
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -115,7 +115,7 @@ class PagerDutyAPI:
                 if response.status_code == 429:
                     retry_after = int(response.headers.get("Retry-After", 60))
                     logger.warning(
-                        f"Rate limited ($Rate = {self.rate_limiter.minimum_interval:.3f}\\text{{s/req}}$). Waiting {retry_after}s..."
+                        f"Rate limited ($Rate = {1.0 / self.rate_limiter.minimum_interval:.1f}\\text{{ req/s}}$). Waiting {retry_after}s..."
                     )
                     time.sleep(retry_after)
                     continue
@@ -321,18 +321,27 @@ def export_to_csv(
     filename = f"{resolved_prefix}_{timestamp}.csv"
 
     fieldnames = [
-        "user_id",
-        "name",
-        "email",
-        "license_name",
-        "license_description",
-        "status",
+        "User ID",
+        "Name",
+        "Email",
+        "License Name",
+        "License Description",
+        "Status",
     ]
 
     with open(filename, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(users_data)
+        for row in users_data:
+            mapped_row = {
+                "User ID": row.get("user_id"),
+                "Name": row.get("name"),
+                "Email": row.get("email"),
+                "License Name": row.get("license_name"),
+                "License Description": row.get("license_description"),
+                "Status": row.get("status"),
+            }
+            writer.writerow(mapped_row)
 
     logger.info(f"✓ CSV file created successfully: '{filename}'")
     return filename
@@ -368,12 +377,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     parser = build_parser()
-
-    # Zero-argument safety guard: Display help menu automatically
-    if len(sys.argv) == 1:
-        parser.print_help()
-        sys.exit(0)
-
     args = parser.parse_args()
 
     api_token = os.environ.get("PAGERDUTY_API_TOKEN") or os.environ.get("API_TOKEN")

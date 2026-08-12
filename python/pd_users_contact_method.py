@@ -367,11 +367,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
 
-    # Zero-argument safety guard: Display help menu automatically
-    if len(sys.argv) == 1:
-        parser.print_help()
-        sys.exit(0)
-
     args = parser.parse_args()
 
     api_token = os.environ.get("PAGERDUTY_API_TOKEN") or os.environ.get("API_TOKEN")

@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Dict, List, Optional
 import requests
 
-__version__ = "1.4.1"
+__version__ = "1.4.2"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -86,7 +86,7 @@ class PagerDutyAPI:
         )
 
     def _rate_limit(self) -> None:
-        """Enforces client-side rate limiting ($Rate = 8\\text{ req/s}$)[cite: 14]."""
+        """Enforces client-side rate limiting ($Rate = 8\\text{ req/s}$)[cite: 14, 15]."""
         elapsed = time.time() - self.last_request
         if elapsed < self.min_interval:
             time.sleep(self.min_interval - elapsed)
@@ -174,7 +174,7 @@ class PagerDutyAPI:
                 "offset": offset,
                 "limit": limit,
                 "include[]": ["users"],
-                "time_zone": time_zone, # Pass timezone natively
+                "time_zone": time_zone,
             }
             
             if since:
@@ -196,7 +196,6 @@ class PagerDutyAPI:
                 resolver = None
                 resolver_details = None
 
-                # Pass the target timezone into log_entries requests for native formatting
                 log_params = {"include[]": ["users"], "is_overview": "true", "time_zone": time_zone}
                 log_response = self._request(
                     f"{self.base_url}/incidents/{incident['id']}/log_entries",
@@ -254,54 +253,57 @@ class PagerDutyAPI:
         return incidents
 
 
-def format_datetime(dt_str: str) -> str:
-    """Formats ISO datetime string from natively localized API responses without the timezone offset[cite: 14]."""
+def format_datetime(dt_str: str, target_tz: Optional[tzinfo] = None) -> str:
+    """Formats ISO datetime string from natively localized API responses with a colonized offset[cite: 14]."""
     if not dt_str or dt_str == "N/A":
         return dt_str
     try:
         dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
+        if target_tz:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=target_tz)
+            else:
+                dt = dt.astimezone(target_tz)
+
+        formatted = dt.strftime("%Y-%m-%d %H:%M:%S %z")
+        if len(formatted) > 5 and formatted[-5] in ("+", "-"):
+            formatted = formatted[:-2] + ":" + formatted[-2:]
+        return formatted.strip()
     except Exception:
         return dt_str
 
 
 def export_to_csv(
     incidents: List[Dict],
-    time_zone: str,
+    target_tz: tzinfo,
     prefix: Optional[str] = None,
     default_prefix: str = "pagerduty_resolved_incidents"
 ) -> Optional[str]:
-    """Export resolved incident records to a safely versioned timestamped CSV file[cite: 14]."""
+    """Export resolved incident records to a safely versioned timestamped CSV file[cite: 14, 15]."""
     if not incidents:
         logger.info("No resolved incidents available to export.")
         return None
 
-    # 1. Resolve fallback hierarchy: Explicit CLI arg -> Environment Var -> Default
     resolved_prefix = prefix or os.environ.get("OUTPUT_FILE") or default_prefix
 
-    # 2. Sanitize extension if user explicitly passed `.csv`
     if resolved_prefix.endswith(".csv"):
         resolved_prefix = resolved_prefix[:-4]
 
-    # 3. Construct dynamic collision-proof timestamped filename
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     filename = f"{resolved_prefix}_{timestamp}.csv"
 
-    created_at_col = f"created_at_{time_zone}"
-    resolved_at_col = f"resolved_at_{time_zone}"
-
     fieldnames = [
-        "incident_number",
-        "incident_id",
-        "title",
-        created_at_col,
-        resolved_at_col,
-        "resolver_name",
-        "resolver_email",
-        "resolver_id",
-        "service",
-        "service_id",
-        "urgency",
+        "Incident Number",
+        "Incident ID",
+        "Incident Title",
+        "Created At",
+        "Resolved At",
+        "Resolver Name",
+        "Resolver Email",
+        "Resolver ID",
+        "Service",
+        "Service ID",
+        "Urgency",
     ]
 
     with open(filename, "w", newline="", encoding="utf-8") as f:
@@ -311,17 +313,17 @@ def export_to_csv(
             resolver = incident.get("resolver") or {}
             writer.writerow(
                 {
-                    "incident_number": incident.get("incident_number", "N/A"),
-                    "incident_id": incident.get("incident_id", "N/A"),
-                    "title": incident.get("title", "N/A"),
-                    created_at_col: format_datetime(incident.get("created_at", "")),
-                    resolved_at_col: format_datetime(incident.get("resolved_at", "")),
-                    "resolver_name": resolver.get("name", "Unknown"),
-                    "resolver_email": resolver.get("email", "Unknown"),
-                    "resolver_id": resolver.get("id", "Unknown"),
-                    "service": incident.get("service", "N/A"),
-                    "service_id": incident.get("service_id", "N/A"),
-                    "urgency": incident.get("urgency", "N/A"),
+                    "Incident Number": incident.get("incident_number", "N/A"),
+                    "Incident ID": incident.get("incident_id", "N/A"),
+                    "Incident Title": incident.get("title", "N/A"),
+                    "Created At": format_datetime(incident.get("created_at", ""), target_tz),
+                    "Resolved At": format_datetime(incident.get("resolved_at", ""), target_tz),
+                    "Resolver Name": resolver.get("name", "Unknown"),
+                    "Resolver Email": resolver.get("email", "Unknown"),
+                    "Resolver ID": resolver.get("id", "Unknown"),
+                    "Service": incident.get("service", "N/A"),
+                    "Service ID": incident.get("service_id", "N/A"),
+                    "Urgency": incident.get("urgency", "N/A"),
                 }
             )
 
@@ -391,7 +393,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
 
-    # Automatically show help and exit if no CLI arguments are supplied
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(0)
@@ -412,10 +413,8 @@ def main() -> None:
 
     if args.default:
         since_local = (now_local - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
-        # Snap until_local to the absolute end of the target timezone's day
         until_local = now_local.replace(hour=23, minute=59, second=59, microsecond=0)
 
-        # Drop the Z and pass pure local strings natively to PagerDuty API
         since = since_local.strftime("%Y-%m-%dT%H:%M:%S")
         until = until_local.strftime("%Y-%m-%dT%H:%M:%S")
 
@@ -453,7 +452,6 @@ def main() -> None:
         api = PagerDutyAPI(api_token, rate_limit=args.rate_limit)
         start_time = time.time()
 
-        # Pass target timezone into the incident fetcher
         incidents = api.get_resolved_incidents(
             since=since, until=until, service_ids=service_ids, time_zone=args.timezone
         )
@@ -461,8 +459,7 @@ def main() -> None:
             logger.warning("No resolved incidents found matching the criteria.")
             sys.exit(0)
 
-        # Utilize safely isolated output writing, explicitly passing the timezone
-        output_filename = export_to_csv(incidents, time_zone=args.timezone, prefix=args.output)
+        output_filename = export_to_csv(incidents, target_tz=target_tz, prefix=args.output)
 
         elapsed = time.time() - start_time
         print(f"\n{'='*60}")

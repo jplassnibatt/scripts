@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 from requests.adapters import HTTPAdapter
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,7 +40,6 @@ class PagerDutyAIOpsReporter:
         self.subdomain = subdomain
         self.max_workers = max_workers
 
-        # Persistent TCP connections across thread pool workers
         self.session = requests.Session()
         adapter = HTTPAdapter(
             pool_connections=max_workers, pool_maxsize=max_workers * 2
@@ -55,7 +54,6 @@ class PagerDutyAIOpsReporter:
             }
         )
 
-        # Thread-safe rate limiting: enforces target delay per request: $\Delta t = 0.04\text{s}$
         self.rate_limit_delay = 0.04
         self.request_lock = threading.Lock()
 
@@ -192,7 +190,6 @@ class PagerDutyAIOpsReporter:
             f"Starting PagerDuty AIOps report generation (v{__version__})..."
         )
 
-        # Fetch services and event orchestrations concurrently
         with ThreadPoolExecutor(max_workers=2) as executor:
             s_future = executor.submit(self.get_all_services)
             o_future = executor.submit(self.get_all_orchestrations)
@@ -220,18 +217,17 @@ class PagerDutyAIOpsReporter:
 
             csv_rows.append(
                 {
-                    "type": item_type,
-                    "id": item_id,
-                    "name": item_info.get("name", "Unknown"),
-                    "aiops_enabled": aiops_enabled,
-                    "html_url": html_url,
+                    "Type": item_type,
+                    "ID": item_id,
+                    "Name": item_info.get("name", "Unknown"),
+                    "AIOps Enabled": aiops_enabled,
+                    "HTML URL": html_url,
                 }
             )
 
-        # Explicit grouping logic: 'service' first, 'event_orchestration' second, sorted alphabetically by name
         type_order = {"service": 0, "event_orchestration": 1}
         csv_rows.sort(
-            key=lambda r: (type_order.get(r["type"], 2), r["name"].lower())
+            key=lambda r: (type_order.get(r["Type"], 2), r["Name"].lower())
         )
 
         return csv_rows
@@ -243,18 +239,15 @@ def export_to_csv(
     default_prefix: str = "pagerduty_aiops",
 ) -> str:
     """Exports structured log data to a safely versioned timestamped CSV file."""
-    # 1. Resolve fallback hierarchy: Explicit CLI arg -> Environment Var -> Default
     resolved_prefix = prefix or os.environ.get("OUTPUT_FILE") or default_prefix
 
-    # 2. Sanitize extension if user explicitly passed `.csv`
     if resolved_prefix.endswith(".csv"):
         resolved_prefix = resolved_prefix[:-4]
 
-    # 3. Construct dynamic collision-proof timestamped filename
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     filename = f"{resolved_prefix}_{timestamp}.csv"
 
-    fieldnames = ["type", "id", "name", "aiops_enabled", "html_url"]
+    fieldnames = ["Type", "ID", "Name", "AIOps Enabled", "HTML URL"]
     with open(filename, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
@@ -295,12 +288,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     parser = build_parser()
-
-    # Zero-argument safety guard: Display help menu automatically
-    if len(sys.argv) == 1:
-        parser.print_help()
-        sys.exit(0)
-
     args = parser.parse_args()
 
     api_token = os.environ.get("PAGERDUTY_API_TOKEN") or os.environ.get(
@@ -325,8 +312,8 @@ def main() -> None:
         output_file = export_to_csv(audit_data, prefix=args.output)
         
         elapsed = time.time() - start_time
-        services_enabled = sum(1 for r in audit_data if r["type"] == "service" and r["aiops_enabled"])
-        orchestrations_enabled = sum(1 for r in audit_data if r["type"] == "event_orchestration" and r["aiops_enabled"])
+        services_enabled = sum(1 for r in audit_data if r["Type"] == "service" and r["AIOps Enabled"])
+        orchestrations_enabled = sum(1 for r in audit_data if r["Type"] == "event_orchestration" and r["AIOps Enabled"])
 
         print(f"\n{'='*60}")
         print(f"✓ Audited {len(audit_data)} total items in {elapsed:.2f}s")

@@ -11,14 +11,14 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 import requests
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
 class PagerDutyAPI:
-    """PagerDuty REST API v2 Client with thread-safe rate limiting."""
+    """PagerDuty REST API v2 Client with thread-safe rate limiting[cite: 12]."""
 
     def __init__(self, api_token: str, max_rate_per_second: int = 5):
         if not api_token:
@@ -40,7 +40,7 @@ class PagerDutyAPI:
         )
 
     def _rate_limit(self) -> None:
-        """Enforces thread-safe client-side rate limiting."""
+        """Enforces thread-safe client-side rate limiting ($Rate = 5\\text{ req/s}$)[cite: 12]."""
         with self.lock:
             elapsed = time.time() - self.last_request
             if elapsed < self.min_interval:
@@ -50,7 +50,7 @@ class PagerDutyAPI:
     def _request(
         self, url: str, params: Optional[Dict] = None, max_retries: int = 3
     ) -> Optional[requests.Response]:
-        """Makes a rate-limited HTTP GET request with retry backoff."""
+        """Makes a rate-limited HTTP GET request with retry backoff[cite: 12]."""
         for attempt in range(max_retries):
             try:
                 self._rate_limit()
@@ -80,7 +80,7 @@ class PagerDutyAPI:
         return None
 
     def get_all_incident_workflows(self) -> List[Dict[str, Any]]:
-        """Fetch all incident workflows using offset pagination."""
+        """Fetch all incident workflows using offset pagination[cite: 12]."""
         workflows = []
         offset = 0
         limit = 100
@@ -104,7 +104,7 @@ class PagerDutyAPI:
         return workflows
 
     def get_workflow_details(self, workflow_id: str) -> Dict[str, Any]:
-        """Fetch detailed information for a specific workflow."""
+        """Fetch detailed information for a specific workflow[cite: 12]."""
         response = self._request(f"{self.base_url}/incident_workflows/{workflow_id}")
         if response:
             return response.json().get("incident_workflow", {})
@@ -114,7 +114,7 @@ class PagerDutyAPI:
 def process_single_workflow(
     api: PagerDutyAPI, workflow: Dict[str, Any], index: int, total: int
 ) -> List[Dict[str, Any]]:
-    """Process a single workflow and extract its steps."""
+    """Process a single workflow and extract its steps[cite: 12]."""
     workflow_id = workflow.get("id")
     workflow_name = workflow.get("name")
     results = []
@@ -163,7 +163,7 @@ def process_single_workflow(
 def extract_workflow_steps_parallel(
     api: PagerDutyAPI, workflows: List[Dict[str, Any]], max_workers: int
 ) -> List[Dict[str, Any]]:
-    """Extract workflow and step information using parallel processing."""
+    """Extract workflow and step information using parallel processing[cite: 12]."""
     all_results = []
     total = len(workflows)
 
@@ -191,25 +191,29 @@ def export_to_csv(
     prefix: Optional[str] = None, 
     default_prefix: str = "pagerduty_incident_workflows_steps"
 ) -> str:
-    """Writes data to a safely versioned, dynamically named timestamped CSV file."""
-    # 1. Resolve fallback hierarchy: Explicit CLI arg -> Environment Var -> Default
+    """Writes data to a safely versioned, dynamically named timestamped CSV file[cite: 12]."""
     resolved_prefix = prefix or os.environ.get("OUTPUT_FILE") or default_prefix
 
-    # 2. Sanitize extension if user explicitly passed `.csv`
     if resolved_prefix.endswith(".csv"):
         resolved_prefix = resolved_prefix[:-4]
 
-    # 3. Construct dynamic collision-proof timestamped filename
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     filename = f"{resolved_prefix}_{timestamp}.csv"
 
-    fieldnames = ["workflow_id", "workflow_name", "is_enabled", "step_name"]
+    fieldnames = ["Incident Workflow ID", "Incident Workflow Name", "Is Enabled", "Step Name"]
 
     with open(filename, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
         if data:
-            writer.writerows(data)
+            for row in data:
+                mapped_row = {
+                    "Incident Workflow ID": row.get("workflow_id"),
+                    "Incident Workflow Name": row.get("workflow_name"),
+                    "Is Enabled": row.get("is_enabled"),
+                    "Step Name": row.get("step_name"),
+                }
+                writer.writerow(mapped_row)
 
     logger.info(f"✓ CSV file created: {filename}")
     logger.info(f"✓ Total rows written: {len(data)}")
@@ -217,7 +221,7 @@ def export_to_csv(
 
 
 def validate_worker_limit(value: str) -> int:
-    """Argparse type validator ensuring workers remain within safe bounds."""
+    """Argparse type validator ensuring workers remain within safe bounds[cite: 12]."""
     try:
         ivalue = int(value)
     except ValueError:
@@ -231,14 +235,14 @@ def validate_worker_limit(value: str) -> int:
 
 
 class WideHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
-    """Custom help formatter providing extended spacing for flag alignment."""
+    """Custom help formatter providing extended spacing for flag alignment[cite: 12]."""
 
     def __init__(self, prog: str):
         super().__init__(prog, max_help_position=40, width=110)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Builds CLI options for the extraction tool."""
+    """Builds CLI options for the extraction tool[cite: 12]."""
     parser = argparse.ArgumentParser(
         description=f"CSE - PagerDuty Incident Workflows Steps v{__version__}",
         formatter_class=WideHelpFormatter,
@@ -261,11 +265,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     parser = build_parser()
-    
-    if len(sys.argv) == 1:
-        parser.print_help()
-        sys.exit(0)
-        
     args = parser.parse_args()
 
     api_token = os.environ.get("PAGERDUTY_API_TOKEN") or os.environ.get(
@@ -290,7 +289,6 @@ def main() -> None:
         logger.info(f"Extracting steps for {len(workflows)} workflows using {args.workers} workers...")
         results = extract_workflow_steps_parallel(api, workflows, args.workers)
 
-        # Utilize isolated export functionality with parsed arguments
         filename = export_to_csv(results, prefix=args.output)
 
         elapsed_time = time.time() - start_time
