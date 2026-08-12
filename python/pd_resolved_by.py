@@ -5,12 +5,14 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Dict, List, Optional
 import requests
 
-__version__ = "1.4.2"
+__version__ = "1.5.1"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -74,6 +76,7 @@ class PagerDutyAPI:
         self.user_cache: Dict[str, Dict[str, str]] = {}
         self.min_interval = 1.0 / rate_limit
         self.last_request = 0.0
+        self.rate_lock = threading.Lock()
 
         self.session = requests.Session()
         self.session.headers.update(
@@ -86,11 +89,12 @@ class PagerDutyAPI:
         )
 
     def _rate_limit(self) -> None:
-        """Enforces client-side rate limiting ($Rate = 8\\text{ req/s}$)."""
-        elapsed = time.time() - self.last_request
-        if elapsed < self.min_interval:
-            time.sleep(self.min_interval - elapsed)
-        self.last_request = time.time()
+        """Enforces thread-safe client-side rate limiting ($Rate = 8\\text{ req/s}$)."""
+        with self.rate_lock:
+            elapsed = time.time() - self.last_request
+            if elapsed < self.min_interval:
+                time.sleep(self.min_interval - elapsed)
+            self.last_request = time.time()
 
     def _request(
         self, url: str, params: Optional[Dict] = None, max_retries: int = 3
@@ -140,6 +144,15 @@ class PagerDutyAPI:
 
         return None
 
+    def validate_token(self) -> bool:
+        """Validates API token credentials against the `/users` endpoint."""
+        logger.info("Validating API token...")
+        response = self._request(f"{self.base_url}/users", params={"limit": 1})
+        if response and response.status_code == 200:
+            logger.info("✓ API token validated successfully")
+            return True
+        return False
+
     def get_user_details(self, user_id: str) -> Optional[Dict[str, str]]:
         """Fetch user details with local memory caching to eliminate duplicate API requests."""
         if user_id in self.user_cache:
@@ -156,10 +169,10 @@ class PagerDutyAPI:
             return self.user_cache[user_id]
         return None
 
-    def get_resolved_incidents(
+    def fetch_resolved_incidents_raw(
         self, since: Optional[str] = None, until: Optional[str] = None, service_ids: Optional[List[str]] = None, time_zone: str = "UTC"
     ) -> List[Dict]:
-        """Fetch resolved incidents natively evaluated by PagerDuty's time_zone handler."""
+        """Fetch resolved incidents (pagination only) natively evaluated by PagerDuty's time_zone handler."""
         logger.info(f"Fetching resolved incidents from native API window: {since or 'Beginning'} -> {until or 'Now'} (TZ: {time_zone})")
         if service_ids:
             logger.info(f"Filtering by service IDs: {', '.join(service_ids)}")
@@ -176,7 +189,7 @@ class PagerDutyAPI:
                 "include[]": ["users"],
                 "time_zone": time_zone,
             }
-            
+
             if since:
                 params["since"] = since
             if until:
@@ -190,64 +203,99 @@ class PagerDutyAPI:
                 break
 
             data = response.json()
-            fetched_batch = data.get("incidents", [])
-
-            for incident in fetched_batch:
-                resolver = None
-                resolver_details = None
-
-                log_params = {"include[]": ["users"], "is_overview": "true", "time_zone": time_zone}
-                log_response = self._request(
-                    f"{self.base_url}/incidents/{incident['id']}/log_entries",
-                    params=log_params,
-                )
-
-                if log_response and log_response.status_code == 200:
-                    log_data = log_response.json()
-                    for entry in log_data.get("log_entries", []):
-                        if entry.get("type") == "resolve_log_entry":
-                            resolver = entry.get("agent", {})
-                            if resolver and resolver.get("id"):
-                                resolver_details = self.get_user_details(resolver["id"])
-                            break
-
-                incident_info = {
-                    "incident_id": incident.get("id", "N/A"),
-                    "incident_number": incident.get("incident_number", "N/A"),
-                    "title": incident.get("title", "N/A"),
-                    "created_at": incident.get("created_at", "N/A"),
-                    "resolved_at": incident.get("resolved_at", "N/A"),
-                    "resolver": (
-                        {
-                            "id": resolver.get("id") if resolver else None,
-                            "name": (
-                                resolver_details["name"]
-                                if resolver_details
-                                else resolver.get("summary") if resolver else "Unknown"
-                            ),
-                            "email": (
-                                resolver_details["email"]
-                                if resolver_details
-                                else "Unknown"
-                            ),
-                        }
-                        if resolver
-                        else None
-                    ),
-                    "urgency": incident.get("urgency", "N/A"),
-                    "service": incident.get("service", {}).get("summary", "N/A"),
-                    "service_id": incident.get("service", {}).get("id", "N/A"),
-                }
-
-                incidents.append(incident_info)
-
-                if len(incidents) % 10 == 0:
-                    logger.info(f"Processed {len(incidents)} resolved incidents...")
+            incidents.extend(data.get("incidents", []))
 
             if not data.get("more", False):
                 break
 
             offset += limit
+
+        logger.info(f"✓ Retrieved {len(incidents)} resolved incidents")
+        return incidents
+
+    def enrich_incident_with_resolver(self, incident: Dict, time_zone: str = "UTC") -> Dict:
+        """Fetch log entries for a single incident and identify who resolved it."""
+        resolver = None
+        resolver_details = None
+
+        log_params = {"include[]": ["users"], "is_overview": "true", "time_zone": time_zone}
+        log_response = self._request(
+            f"{self.base_url}/incidents/{incident['id']}/log_entries",
+            params=log_params,
+        )
+
+        if log_response and log_response.status_code == 200:
+            log_data = log_response.json()
+            for entry in log_data.get("log_entries", []):
+                if entry.get("type") == "resolve_log_entry":
+                    resolver = entry.get("agent", {})
+                    if resolver and resolver.get("id"):
+                        resolver_details = self.get_user_details(resolver["id"])
+                    break
+
+        return {
+            "incident_id": incident.get("id", "N/A"),
+            "incident_number": incident.get("incident_number", "N/A"),
+            "title": incident.get("title", "N/A"),
+            "created_at": incident.get("created_at", "N/A"),
+            "resolved_at": incident.get("resolved_at", "N/A"),
+            "resolver": (
+                {
+                    "id": resolver.get("id") if resolver else None,
+                    "name": (
+                        resolver_details["name"]
+                        if resolver_details
+                        else resolver.get("summary") if resolver else "Unknown"
+                    ),
+                    "email": (
+                        resolver_details["email"]
+                        if resolver_details
+                        else "Unknown"
+                    ),
+                }
+                if resolver
+                else None
+            ),
+            "urgency": incident.get("urgency", "N/A"),
+            "service": incident.get("service", {}).get("summary", "N/A"),
+            "service_id": incident.get("service", {}).get("id", "N/A"),
+        }
+
+    def get_resolved_incidents(
+        self,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+        service_ids: Optional[List[str]] = None,
+        time_zone: str = "UTC",
+        max_workers: int = 5,
+    ) -> List[Dict]:
+        """Fetch resolved incidents and enrich each with resolver details concurrently."""
+        raw_incidents = self.fetch_resolved_incidents_raw(since, until, service_ids, time_zone)
+        if not raw_incidents:
+            return []
+
+        logger.info(f"Resolving resolver details for {len(raw_incidents)} incidents using {max_workers} workers...")
+        incidents = []
+        completed = 0
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_incident = {
+                executor.submit(self.enrich_incident_with_resolver, incident, time_zone): incident
+                for incident in raw_incidents
+            }
+
+            for future in as_completed(future_to_incident):
+                completed += 1
+                try:
+                    incidents.append(future.result())
+                except Exception as e:
+                    incident = future_to_incident[future]
+                    logger.error(f"Error enriching incident {incident.get('id')}: {e}")
+
+                if completed % 10 == 0 or completed == len(raw_incidents):
+                    logger.info(f"Processed {completed}/{len(raw_incidents)} resolved incidents...")
+
+        incidents.sort(key=lambda inc: inc.get("created_at") or "")
 
         logger.info(f"✓ Found total of {len(incidents)} resolved incidents")
         return incidents
@@ -387,6 +435,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=8,
         help="Maximum API requests per second",
     )
+    parser.add_argument(
+        "-w",
+        "--max-workers",
+        type=int,
+        default=5,
+        help="Maximum concurrent worker threads for resolver lookups",
+    )
     return parser
 
 
@@ -450,10 +505,17 @@ def main() -> None:
 
     try:
         api = PagerDutyAPI(api_token, rate_limit=args.rate_limit)
+        if not api.validate_token():
+            sys.exit(1)
+
         start_time = time.time()
 
         incidents = api.get_resolved_incidents(
-            since=since, until=until, service_ids=service_ids, time_zone=args.timezone
+            since=since,
+            until=until,
+            service_ids=service_ids,
+            time_zone=args.timezone,
+            max_workers=args.max_workers,
         )
         if not incidents:
             logger.warning("No resolved incidents found matching the criteria.")

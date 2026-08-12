@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any, Dict, List, Optional
 import requests
 
-__version__ = "1.2.2"
+__version__ = "1.3.0"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -104,6 +104,15 @@ class PagerDutyAcknowledgeExporter:
                     logger.error(f"Request failed after {max_retries} attempts: {e}")
                     return None
         return None
+
+    def validate_token(self) -> bool:
+        """Validates API token credentials against the `/users` endpoint."""
+        logger.info("Validating API token...")
+        response = self._request(f"{self.base_url}/users", params={"limit": 1})
+        if response and response.status_code == 200:
+            logger.info("✓ API token validated successfully")
+            return True
+        return False
 
     def fetch_acknowledgments(self, incident_id: str, time_zone: str = "UTC") -> List[Dict[str, Any]]:
         """Fetches all acknowledgment log entries natively offset to target timezone."""
@@ -257,6 +266,9 @@ def main() -> None:
 
     try:
         exporter = PagerDutyAcknowledgeExporter(api_token)
+        if not exporter.validate_token():
+            sys.exit(1)
+
         start_time = time.time()
 
         ack_entries = exporter.fetch_acknowledgments(args.incident_id, time_zone=args.timezone)

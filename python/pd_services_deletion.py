@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
 import requests
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -73,6 +73,15 @@ class PagerDutyServiceDeleter:
                     logger.error(f"Request failed after {max_retries} attempts: {e}")
                     return None
         return None
+
+    def validate_token(self) -> bool:
+        """Validates API token credentials against the `/users` endpoint."""
+        logger.info("Validating API token...")
+        response = self._request("GET", f"{self.base_url}/users", params={"limit": 1})
+        if response and response.status_code == 200:
+            logger.info("✓ API token validated successfully")
+            return True
+        return False
 
     def fetch_all_services(self) -> List[Dict[str, str]]:
         """Fetches all services using offset pagination checking the `more` boolean."""
@@ -291,6 +300,8 @@ def main() -> None:
         sys.exit(1)
 
     deleter = PagerDutyServiceDeleter(api_token)
+    if not deleter.validate_token():
+        sys.exit(1)
 
     if args.file:
         targets = read_services_from_csv(args.file)

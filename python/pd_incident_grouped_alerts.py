@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Dict, List, Optional
 import requests
 
-__version__ = "1.4.4"
+__version__ = "1.5.0"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -152,6 +152,15 @@ class PagerDutyAnalyzer:
                     logger.error(f"Request failed after {self.max_retries} attempts: {e}")
                     return None
         return None
+
+    def validate_token(self) -> bool:
+        """Validates API token credentials against the `/users` endpoint."""
+        logger.info("Validating API token...")
+        response = self._request(f"{self.base_url}/users", params={"limit": 1})
+        if response and response.status_code == 200:
+            logger.info("✓ API token validated successfully")
+            return True
+        return False
 
     def get_incidents_for_timerange(self, since: str, until: str, time_zone: str = "UTC") -> List[Dict]:
         """Fetches incidents natively evaluated by PagerDuty's time_zone handler."""
@@ -472,6 +481,9 @@ def main() -> None:
 
     try:
         analyzer = PagerDutyAnalyzer(api_token, rate_limit=args.rate_limit)
+        if not analyzer.validate_token():
+            sys.exit(1)
+
         start_time = time.time()
 
         incidents = analyzer.get_all_incidents(since, until, time_zone=args.timezone)

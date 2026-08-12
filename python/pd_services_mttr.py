@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any, Dict, List, Optional
 import requests
 
-__version__ = "1.5.5"
+__version__ = "1.6.0"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -131,6 +131,15 @@ class PagerDutyAPI:
                 wait = 2 ** retry_count
                 time.sleep(wait)
         return None
+
+    def validate_token(self) -> bool:
+        """Validates API token credentials against the `/users` endpoint."""
+        logger.info("Validating API token...")
+        response = self._request(f"{self.base_url}/users", params={"limit": 1})
+        if response and response.status_code == 200:
+            logger.info("✓ API token validated successfully")
+            return True
+        return False
 
     def resolve_service_identifiers(self, identifiers: List[str]) -> List[str]:
         """Translates a mix of Service Names and IDs into pure Service IDs."""
@@ -498,6 +507,9 @@ def main() -> None:
 
     try:
         api = PagerDutyAPI(api_token)
+        if not api.validate_token():
+            sys.exit(1)
+
         start_time = time.time()
 
         resolved_service_ids = None

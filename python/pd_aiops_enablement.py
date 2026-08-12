@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 from requests.adapters import HTTPAdapter
 
-__version__ = "1.3.1"
+__version__ = "1.3.3"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,26 +57,39 @@ class PagerDutyAIOpsReporter:
         self.rate_limit_delay = 0.04
         self.request_lock = threading.Lock()
 
-    def _make_request(self, url: str) -> Dict[str, Any]:
-        """Executes HTTP GET with thread-safe rate limiting and retry handling."""
-        with self.request_lock:
-            time.sleep(self.rate_limit_delay)
+    def _make_request(self, url: str, max_retries: int = 5) -> Dict[str, Any]:
+        """Executes HTTP GET with thread-safe rate limiting and bounded 429 retry handling."""
+        for attempt in range(max_retries):
+            with self.request_lock:
+                time.sleep(self.rate_limit_delay)
 
-        try:
-            response = self.session.get(url, timeout=30)
-            if response.status_code == 429:
-                retry_after = int(response.headers.get("Retry-After", 60))
-                logger.warning(
-                    f"Rate limited (429). Retrying after {retry_after}s..."
-                )
-                time.sleep(retry_after)
-                return self._make_request(url)
+            try:
+                response = self.session.get(url, timeout=30)
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get("Retry-After", 60))
+                    logger.warning(
+                        f"Rate limited (429). Retrying after {retry_after}s... (attempt {attempt + 1}/{max_retries})"
+                    )
+                    time.sleep(retry_after)
+                    continue
 
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Request error for URL {url}: {e}")
-            return {}
+                response.raise_for_status()
+                return response.json()
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Request error for URL {url}: {e}")
+                return {}
+
+        logger.error(f"Giving up on {url} after {max_retries} rate-limit retries.")
+        return {}
+
+    def validate_token(self) -> bool:
+        """Validates API token credentials against the `/users` endpoint."""
+        logger.info("Validating API token...")
+        data = self._make_request(f"{self.base_url}/users?limit=1")
+        if data:
+            logger.info("✓ API token validated successfully")
+            return True
+        return False
 
     def extract_subdomain_from_url(self, html_url: str) -> str:
         """Extracts PagerDuty tenant subdomain from resource HTML URL."""
@@ -301,6 +314,9 @@ def main() -> None:
 
     try:
         reporter = PagerDutyAIOpsReporter(api_token, max_workers=args.workers)
+        if not reporter.validate_token():
+            sys.exit(1)
+
         start_time = time.time()
 
         audit_data = reporter.fetch_audit_data()

@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any, Dict, List, Optional
 import requests
 
-__version__ = "1.4.3"
+__version__ = "1.5.0"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -145,6 +145,15 @@ class PagerDutyAPI:
                     )
                     return None
         return None
+
+    def validate_token(self) -> bool:
+        """Validates API token credentials against the `/users` endpoint."""
+        logger.info("Validating API token...")
+        response = self._request(f"{self.base_url}/users", params={"limit": 1})
+        if response and response.status_code == 200:
+            logger.info("✓ API token validated successfully")
+            return True
+        return False
 
     def fetch_paginated_data(
         self, url: str, key: str, params: Optional[Dict[str, Any]] = None
@@ -564,6 +573,9 @@ def main() -> None:
 
     try:
         api = PagerDutyAPI(api_token, rate_limit=args.rate_limit)
+        if not api.validate_token():
+            sys.exit(1)
+
         start_time = time.time()
 
         resolved_incidents = api.fetch_resolved_incidents(since=since, until=until, time_zone=args.timezone)

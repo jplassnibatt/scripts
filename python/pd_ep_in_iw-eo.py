@@ -6,13 +6,15 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Dict, List, Optional, Set
 
 import requests
 
-__version__ = "1.1.1"
+__version__ = "1.3.0"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -21,11 +23,14 @@ logger = logging.getLogger(__name__)
 class PagerDutyAPI:
     """PagerDuty REST API v2 Client with built-in rate limiting and pagination."""
 
-    def __init__(self, api_token: str):
+    def __init__(self, api_token: str, max_rate_per_second: int = 8):
         if not api_token:
             raise ValueError("API token cannot be empty")
 
         self.base_url = "https://api.pagerduty.com"
+        self.min_interval = 1.0 / max_rate_per_second
+        self.last_request = 0.0
+        self.rate_lock = threading.Lock()
         self.session = requests.Session()
 
         # Enforcing strict header compliance
@@ -38,12 +43,21 @@ class PagerDutyAPI:
             }
         )
 
+    def _rate_limit(self) -> None:
+        """Enforces thread-safe client-side rate limiting."""
+        with self.rate_lock:
+            elapsed = time.time() - self.last_request
+            if elapsed < self.min_interval:
+                time.sleep(self.min_interval - elapsed)
+            self.last_request = time.time()
+
     def request(
         self, url: str, params: Optional[Dict] = None, max_retries: int = 3
     ) -> Optional[requests.Response]:
         """Makes an HTTP GET request with robust error handling and rate-limit backoff."""
         for attempt in range(max_retries):
             try:
+                self._rate_limit()
                 response = self.session.get(url, params=params, timeout=30)
 
                 if response.status_code == 429:
@@ -68,6 +82,15 @@ class PagerDutyAPI:
                     logger.error(f"API Error fetching {url}: {str(e)}")
                     return None
         return None
+
+    def validate_token(self) -> bool:
+        """Validates API token credentials against the `/users` endpoint."""
+        logger.info("Validating API token...")
+        response = self.request(f"{self.base_url}/users", params={"limit": 1})
+        if response and response.status_code == 200:
+            logger.info("✓ API token validated successfully")
+            return True
+        return False
 
     def paginated_get(self, endpoint: str, data_key: str) -> List[dict]:
         """Generic function to fetch paginated data checking the 'more' boolean."""
@@ -159,7 +182,7 @@ class OrchestrationAnalyzer:
         logger.info(f"✓ Fetched {len(services_data)} Services")
         return [{"id": s["id"], "name": s["name"]} for s in services_data]
 
-    def process_workflows(self, ep_map: Dict[str, str]) -> List[dict]:
+    def process_workflows(self, ep_map: Dict[str, str], max_workers: int = 5) -> List[dict]:
         logger.info("Analyzing Incident Workflows...")
         workflows_data = self.api.paginated_get(
             "/incident_workflows", "incident_workflows"
@@ -167,23 +190,24 @@ class OrchestrationAnalyzer:
         ep_ids_set = set(ep_map.keys())
         matches = []
 
-        for wf in workflows_data:
+        def process_one(wf: Dict) -> List[dict]:
             response = self.api.request(
                 f"{self.api.base_url}/incident_workflows/{wf['id']}"
             )
             if not response:
-                continue
+                return []
 
             details = response.json().get("incident_workflow", {})
             found_eps = self.find_ep_ids_in_json(details, ep_ids_set)
 
+            results = []
             for ep_id in found_eps:
                 url = (
                     f"https://{self.subdomain}.pagerduty.com/incident-workflows/workflows/{wf['id']}"
                     if self.subdomain
                     else ""
                 )
-                matches.append(
+                results.append(
                     {
                         "incident_workflow_id": wf["id"],
                         "incident_workflow_name": wf["name"],
@@ -194,10 +218,23 @@ class OrchestrationAnalyzer:
                         "url": url,
                     }
                 )
+            return results
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_wf = {
+                executor.submit(process_one, wf): wf for wf in workflows_data
+            }
+            for future in as_completed(future_to_wf):
+                try:
+                    matches.extend(future.result())
+                except Exception as e:
+                    wf = future_to_wf[future]
+                    logger.error(f"Error processing workflow {wf.get('id')}: {e}")
+
         return matches
 
     def process_global_orchestrations(
-        self, ep_map: Dict[str, str]
+        self, ep_map: Dict[str, str], max_workers: int = 5
     ) -> List[dict]:
         logger.info("Analyzing Global Event Orchestrations...")
         orchestrations = self.api.paginated_get(
@@ -206,16 +243,17 @@ class OrchestrationAnalyzer:
         ep_ids_set = set(ep_map.keys())
         matches = []
 
-        for orch in orchestrations:
+        def process_one(orch: Dict) -> List[dict]:
             response = self.api.request(
                 f"{self.api.base_url}/event_orchestrations/{orch['id']}/global"
             )
             if not response:
-                continue
+                return []
 
             details = response.json()
             found_eps = self.find_ep_ids_in_json(details, ep_ids_set)
 
+            results = []
             for ep_id in found_eps:
                 rule_ids = self.extract_rule_ids(details, ep_id)
                 for rule_id in rule_ids or [None]:
@@ -224,7 +262,7 @@ class OrchestrationAnalyzer:
                         if self.subdomain and rule_id
                         else ""
                     )
-                    matches.append(
+                    results.append(
                         {
                             "incident_workflow_id": "",
                             "incident_workflow_name": "",
@@ -237,25 +275,39 @@ class OrchestrationAnalyzer:
                             "url": url,
                         }
                     )
+            return results
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_orch = {
+                executor.submit(process_one, orch): orch for orch in orchestrations
+            }
+            for future in as_completed(future_to_orch):
+                try:
+                    matches.extend(future.result())
+                except Exception as e:
+                    orch = future_to_orch[future]
+                    logger.error(f"Error processing orchestration {orch.get('id')}: {e}")
+
         return matches
 
     def process_service_orchestrations(
-        self, services: List[Dict[str, str]], ep_map: Dict[str, str]
+        self, services: List[Dict[str, str]], ep_map: Dict[str, str], max_workers: int = 5
     ) -> List[dict]:
         logger.info("Analyzing Service Event Orchestrations...")
         ep_ids_set = set(ep_map.keys())
         matches = []
 
-        for svc in services:
+        def process_one(svc: Dict[str, str]) -> List[dict]:
             response = self.api.request(
                 f"{self.api.base_url}/event_orchestrations/services/{svc['id']}"
             )
             if not response:
-                continue
+                return []
 
             details = response.json()
             found_eps = self.find_ep_ids_in_json(details, ep_ids_set)
 
+            results = []
             for ep_id in found_eps:
                 rule_ids = self.extract_rule_ids(details, ep_id)
                 for rule_id in rule_ids or [None]:
@@ -264,7 +316,7 @@ class OrchestrationAnalyzer:
                         if self.subdomain and rule_id
                         else ""
                     )
-                    matches.append(
+                    results.append(
                         {
                             "incident_workflow_id": "",
                             "incident_workflow_name": "",
@@ -275,6 +327,19 @@ class OrchestrationAnalyzer:
                             "url": url,
                         }
                     )
+            return results
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_svc = {
+                executor.submit(process_one, svc): svc for svc in services
+            }
+            for future in as_completed(future_to_svc):
+                try:
+                    matches.extend(future.result())
+                except Exception as e:
+                    svc = future_to_svc[future]
+                    logger.error(f"Error processing service {svc.get('id')}: {e}")
+
         return matches
 
 
@@ -350,6 +415,20 @@ def build_parser() -> argparse.ArgumentParser:
         default="pagerduty_ep_dependencies",
         help="Custom CSV filename prefix",
     )
+    parser.add_argument(
+        "-w",
+        "--workers",
+        type=int,
+        default=5,
+        help="Number of concurrent worker threads",
+    )
+    parser.add_argument(
+        "-r",
+        "--rate-limit",
+        type=int,
+        default=8,
+        help="Maximum API requests per second",
+    )
     return parser
 
 
@@ -370,7 +449,10 @@ def main() -> None:
         sys.exit(1)
 
     try:
-        api = PagerDutyAPI(api_token)
+        api = PagerDutyAPI(api_token, max_rate_per_second=args.rate_limit)
+        if not api.validate_token():
+            sys.exit(1)
+
         analyzer = OrchestrationAnalyzer(api)
 
         ep_map = analyzer.get_escalation_policies()
@@ -382,10 +464,14 @@ def main() -> None:
 
         # Aggregate matches
         matches = []
-        matches.extend(analyzer.process_workflows(ep_map))
-        matches.extend(analyzer.process_global_orchestrations(ep_map))
+        matches.extend(analyzer.process_workflows(ep_map, max_workers=args.workers))
         matches.extend(
-            analyzer.process_service_orchestrations(services, ep_map)
+            analyzer.process_global_orchestrations(ep_map, max_workers=args.workers)
+        )
+        matches.extend(
+            analyzer.process_service_orchestrations(
+                services, ep_map, max_workers=args.workers
+            )
         )
 
         # Utilize safely isolated output writing
