@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 def parse_lookback_span(span_str: str) -> timedelta:
-    """Parses dynamic lookback strings (e.g., '2d', '3w', '1m', '1y') into a timedelta[cite: 18]."""
+    """Parses dynamic lookback strings (e.g., '2d', '3w', '1m', '1y') into a timedelta."""
     match = re.match(r"^(\d+)([dwmy])$", span_str.strip().lower())
     if not match:
         raise ValueError(
@@ -40,7 +40,7 @@ def parse_lookback_span(span_str: str) -> timedelta:
 
 
 def parse_timezone(tz_str: str) -> tzinfo:
-    """Parses timezone strings into tzinfo objects (supports UTC, offsets like +05:00/-08:00, or IANA names)[cite: 18]."""
+    """Parses timezone strings into tzinfo objects (supports UTC, offsets like +05:00/-08:00, or IANA names)."""
     tz_str = tz_str.strip()
     if tz_str.upper() in ("UTC", "Z"):
         return timezone.utc
@@ -64,9 +64,9 @@ def parse_timezone(tz_str: str) -> tzinfo:
 
 
 class PagerDutyAPI:
-    """PagerDuty REST API v2 client with built-in rate-limiting and session management[cite: 18].
+    """PagerDuty REST API v2 client with built-in rate-limiting and session management.
 
-    Handles default rate limits of $Rate = 250\text{ req/min}$ with client-side throttling[cite: 18, 19].
+    Handles default rate limits of $Rate = 250\text{ req/min}$ with client-side throttling.
     """
 
     def __init__(self, api_token: str, rate_limit: int = 8):
@@ -88,7 +88,7 @@ class PagerDutyAPI:
         )
 
     def _rate_limit(self) -> None:
-        """Enforces client-side rate limiting ($Rate = 8\text{ req/s}$)[cite: 18]."""
+        """Enforces client-side rate limiting ($Rate = 8\text{ req/s}$)."""
         elapsed = time.time() - self.last_request
         if elapsed < self.min_interval:
             time.sleep(self.min_interval - elapsed)
@@ -97,7 +97,7 @@ class PagerDutyAPI:
     def _request(
         self, url: str, params: Optional[Dict] = None, max_retries: int = 3
     ) -> Optional[requests.Response]:
-        """Makes API request with exponential backoff and rate-limit mitigation[cite: 18, 19]."""
+        """Makes API request with exponential backoff and rate-limit mitigation."""
         for attempt in range(max_retries):
             try:
                 self._rate_limit()
@@ -141,7 +141,7 @@ class PagerDutyAPI:
         return None
 
     def validate_token(self) -> bool:
-        """Validates API token credentials against the `/users` endpoint[cite: 18]."""
+        """Validates API token credentials against the `/users` endpoint."""
         logger.info("Validating API token...")
         response = self._request(f"{self.base_url}/users", params={"limit": 1})
         if response and response.status_code == 200:
@@ -152,7 +152,7 @@ class PagerDutyAPI:
     def get_incidents(
         self, since: Optional[str] = None, until: Optional[str] = None, time_zone: str = "UTC"
     ) -> List[Dict]:
-        """Fetches all incidents within specified date range natively evaluated by PagerDuty's time_zone handler[cite: 18]."""
+        """Fetches all incidents within specified date range natively evaluated by PagerDuty's time_zone handler."""
         incidents = []
         offset = 0
         limit = 100
@@ -193,7 +193,7 @@ class PagerDutyAPI:
 def extract_incident_data(
     incidents: List[Dict], target_tz: Optional[tzinfo] = None
 ) -> List[Dict]:
-    """Extracts and flattens incident records directly from natively localized API responses[cite: 18]."""
+    """Extracts and flattens incident records directly from natively localized API responses."""
     results = []
 
     for incident in incidents:
@@ -241,7 +241,7 @@ def export_to_csv(
     prefix: Optional[str] = None,
     default_prefix: str = "pagerduty_incidents",
 ) -> str:
-    """Exports dataset to a safely versioned, timestamped CSV file[cite: 18, 19]."""
+    """Exports dataset to a safely versioned, timestamped CSV file."""
     resolved_prefix = prefix or os.environ.get("OUTPUT_FILE") or default_prefix
 
     if resolved_prefix.endswith(".csv"):
@@ -283,14 +283,14 @@ def export_to_csv(
 
 
 class WideHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
-    """Custom help formatter that increases the spacing between flags and descriptions[cite: 18]."""
+    """Custom help formatter that increases the spacing between flags and descriptions."""
 
     def __init__(self, prog: str):
         super().__init__(prog, max_help_position=40, width=110)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Configures command line interface options[cite: 18]."""
+    """Configures command line interface options."""
     parser = argparse.ArgumentParser(
         description=f"CSE - PagerDuty Incidents Details v{__version__}",
         formatter_class=WideHelpFormatter,

@@ -219,7 +219,7 @@ def process_analytics_data(raw_incidents: List[Dict], target_tz: tzinfo) -> List
             try:
                 dt = datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
                 
-                # The Analytics API natively localizes timestamps but strips the offset making them "naive"[cite: 14]
+                # The Analytics API natively localizes timestamps but strips the offset making them "naive"
                 # We attach the target_tz explicitly so %z can properly format the timezone offset
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=target_tz)
@@ -257,7 +257,7 @@ def export_to_csv(
     prefix: Optional[str] = None,
     default_prefix: str = "pagerduty_analytics_metrics"
 ) -> Optional[str]:
-    """Exports processed incident metrics to a safely versioned timestamped CSV file[cite: 14, 15]."""
+    """Exports processed incident metrics to a safely versioned timestamped CSV file."""
     if not data:
         logger.info("No data available to export.")
         return None

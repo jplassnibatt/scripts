@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 def parse_lookback_span(span_str: str) -> timedelta:
-    """Parses dynamic lookback strings (e.g., '2d', '3w', '1m', '1y') into a timedelta[cite: 15]."""
+    """Parses dynamic lookback strings (e.g., '2d', '3w', '1m', '1y') into a timedelta."""
     match = re.match(r"^(\d+)([dwmy])$", span_str.strip().lower())
     if not match:
         raise ValueError(
@@ -41,7 +41,7 @@ def parse_lookback_span(span_str: str) -> timedelta:
 
 
 def parse_timezone(tz_str: str) -> tzinfo:
-    """Parses timezone strings into tzinfo objects (supports UTC, offsets like +05:00/-08:00, or IANA names)[cite: 15]."""
+    """Parses timezone strings into tzinfo objects (supports UTC, offsets like +05:00/-08:00, or IANA names)."""
     tz_str = tz_str.strip()
     if tz_str.upper() in ("UTC", "Z"):
         return timezone.utc
@@ -65,7 +65,7 @@ def parse_timezone(tz_str: str) -> tzinfo:
 
 
 class ThreadSafeRateLimiter:
-    """Thread-safe rate limiter for client-side request throttling[cite: 15]."""
+    """Thread-safe rate limiter for client-side request throttling."""
 
     def __init__(self, requests_per_second: int = 4):
         self.min_interval = 1.0 / requests_per_second
@@ -73,7 +73,7 @@ class ThreadSafeRateLimiter:
         self.lock = threading.Lock()
 
     def acquire(self) -> None:
-        """Wait if necessary to respect rate limits[cite: 15]."""
+        """Wait if necessary to respect rate limits."""
         with self.lock:
             current_time = time.time()
             time_since_last = current_time - self.last_request_time
@@ -85,7 +85,7 @@ class ThreadSafeRateLimiter:
 
 
 class PagerDutyAnalyzer:
-    """PagerDuty REST API v2 Client for optimized incident alert analysis[cite: 15]."""
+    """PagerDuty REST API v2 Client for optimized incident alert analysis."""
 
     def __init__(self, api_token: str, rate_limit: int = 4):
         if not api_token or not api_token.strip():
@@ -109,7 +109,7 @@ class PagerDutyAnalyzer:
     def _request(
         self, url: str, params: Optional[Dict] = None
     ) -> Optional[requests.Response]:
-        """Makes an HTTP GET request with robust error handling and rate-limit backoff[cite: 15]."""
+        """Makes an HTTP GET request with robust error handling and rate-limit backoff."""
         for attempt in range(self.max_retries):
             try:
                 self.rate_limiter.acquire()
@@ -154,7 +154,7 @@ class PagerDutyAnalyzer:
         return None
 
     def get_incidents_for_timerange(self, since: str, until: str, time_zone: str = "UTC") -> List[Dict]:
-        """Fetches incidents natively evaluated by PagerDuty's time_zone handler[cite: 15]."""
+        """Fetches incidents natively evaluated by PagerDuty's time_zone handler."""
         incidents = []
         offset = 0
         limit = 100
@@ -186,7 +186,7 @@ class PagerDutyAnalyzer:
         return incidents
 
     def get_all_incidents(self, since_date: str, until_date: str, time_zone: str = "UTC") -> List[Dict]:
-        """Handles PagerDuty's 6-month max date range constraint using naive local boundaries[cite: 15]."""
+        """Handles PagerDuty's 6-month max date range constraint using naive local boundaries."""
         all_incidents = []
 
         def parse_dt(d_str: str) -> datetime:
@@ -227,7 +227,7 @@ class PagerDutyAnalyzer:
     def analyze_incidents(
         self, incidents: List[Dict], target_tz: Optional[tzinfo] = None
     ) -> Dict[str, Dict]:
-        """Filters and analyzes incidents, extracting natively localized timestamps[cite: 15]."""
+        """Filters and analyzes incidents, extracting natively localized timestamps."""
         alert_counts = {}
         logger.info("Analyzing incidents for multiple alerts...")
 
@@ -273,7 +273,7 @@ class PagerDutyAnalyzer:
 
 
 def format_period_datetime(dt_str: str, tz: tzinfo) -> str:
-    """Formats period date string with a colonized UTC offset[cite: 15]."""
+    """Formats period date string with a colonized UTC offset."""
     if not dt_str:
         return dt_str
     try:
@@ -305,7 +305,7 @@ def export_to_csv(
     prefix: Optional[str] = None,
     default_prefix: str = "pagerduty_incident_grouped_alerts",
 ) -> str:
-    """Exports data to a safely versioned timestamped CSV file[cite: 15]."""
+    """Exports data to a safely versioned timestamped CSV file."""
     resolved_prefix = prefix or os.environ.get("OUTPUT_FILE") or default_prefix
 
     if resolved_prefix.endswith(".csv"):
@@ -363,14 +363,14 @@ def export_to_csv(
 
 
 class WideHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
-    """Custom help formatter providing extended spacing for flag alignment[cite: 15]."""
+    """Custom help formatter providing extended spacing for flag alignment."""
 
     def __init__(self, prog: str):
         super().__init__(prog, max_help_position=40, width=110)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Builds CLI options with explicit default, relative lookback, and custom timezone options[cite: 15]."""
+    """Builds CLI options with explicit default, relative lookback, and custom timezone options."""
     parser = argparse.ArgumentParser(
         description=f"CSE - PagerDuty Grouped Alerts v{__version__}",
         formatter_class=WideHelpFormatter,

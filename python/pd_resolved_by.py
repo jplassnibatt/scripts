@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 def parse_lookback_span(span_str: str) -> timedelta:
-    """Parses dynamic lookback strings (e.g., '2d', '3w', '1m', '1y') into a timedelta[cite: 14]."""
+    """Parses dynamic lookback strings (e.g., '2d', '3w', '1m', '1y') into a timedelta."""
     match = re.match(r"^(\d+)([dwmy])$", span_str.strip().lower())
     if not match:
         raise ValueError(
@@ -40,7 +40,7 @@ def parse_lookback_span(span_str: str) -> timedelta:
 
 
 def parse_timezone(tz_str: str) -> tzinfo:
-    """Parses timezone strings into tzinfo objects (supports UTC, offsets like +05:00/-08:00, or IANA names)[cite: 14]."""
+    """Parses timezone strings into tzinfo objects (supports UTC, offsets like +05:00/-08:00, or IANA names)."""
     tz_str = tz_str.strip()
     if tz_str.upper() in ("UTC", "Z"):
         return timezone.utc
@@ -64,7 +64,7 @@ def parse_timezone(tz_str: str) -> tzinfo:
 
 
 class PagerDutyAPI:
-    """PagerDuty REST API v2 client with user caching, rate limiting, and session management[cite: 14]."""
+    """PagerDuty REST API v2 client with user caching, rate limiting, and session management."""
 
     def __init__(self, api_token: str, rate_limit: int = 8):
         if not api_token or not api_token.strip():
@@ -86,7 +86,7 @@ class PagerDutyAPI:
         )
 
     def _rate_limit(self) -> None:
-        """Enforces client-side rate limiting ($Rate = 8\\text{ req/s}$)[cite: 14, 15]."""
+        """Enforces client-side rate limiting ($Rate = 8\\text{ req/s}$)."""
         elapsed = time.time() - self.last_request
         if elapsed < self.min_interval:
             time.sleep(self.min_interval - elapsed)
@@ -95,7 +95,7 @@ class PagerDutyAPI:
     def _request(
         self, url: str, params: Optional[Dict] = None, max_retries: int = 3
     ) -> Optional[requests.Response]:
-        """Makes an HTTP GET request with retry backoff and rate-limit handling[cite: 14]."""
+        """Makes an HTTP GET request with retry backoff and rate-limit handling."""
         for attempt in range(max_retries):
             try:
                 self._rate_limit()
@@ -141,7 +141,7 @@ class PagerDutyAPI:
         return None
 
     def get_user_details(self, user_id: str) -> Optional[Dict[str, str]]:
-        """Fetch user details with local memory caching to eliminate duplicate API requests[cite: 14]."""
+        """Fetch user details with local memory caching to eliminate duplicate API requests."""
         if user_id in self.user_cache:
             return self.user_cache[user_id]
 
@@ -159,7 +159,7 @@ class PagerDutyAPI:
     def get_resolved_incidents(
         self, since: Optional[str] = None, until: Optional[str] = None, service_ids: Optional[List[str]] = None, time_zone: str = "UTC"
     ) -> List[Dict]:
-        """Fetch resolved incidents natively evaluated by PagerDuty's time_zone handler[cite: 14]."""
+        """Fetch resolved incidents natively evaluated by PagerDuty's time_zone handler."""
         logger.info(f"Fetching resolved incidents from native API window: {since or 'Beginning'} -> {until or 'Now'} (TZ: {time_zone})")
         if service_ids:
             logger.info(f"Filtering by service IDs: {', '.join(service_ids)}")
@@ -254,7 +254,7 @@ class PagerDutyAPI:
 
 
 def format_datetime(dt_str: str, target_tz: Optional[tzinfo] = None) -> str:
-    """Formats ISO datetime string from natively localized API responses with a colonized offset[cite: 14]."""
+    """Formats ISO datetime string from natively localized API responses with a colonized offset."""
     if not dt_str or dt_str == "N/A":
         return dt_str
     try:
@@ -279,7 +279,7 @@ def export_to_csv(
     prefix: Optional[str] = None,
     default_prefix: str = "pagerduty_resolved_incidents"
 ) -> Optional[str]:
-    """Export resolved incident records to a safely versioned timestamped CSV file[cite: 14, 15]."""
+    """Export resolved incident records to a safely versioned timestamped CSV file."""
     if not incidents:
         logger.info("No resolved incidents available to export.")
         return None
@@ -332,14 +332,14 @@ def export_to_csv(
 
 
 class WideHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
-    """Custom help formatter providing extended spacing for flag alignment[cite: 14]."""
+    """Custom help formatter providing extended spacing for flag alignment."""
 
     def __init__(self, prog: str):
         super().__init__(prog, max_help_position=40, width=110)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build CLI parser options[cite: 14]."""
+    """Build CLI parser options."""
     parser = argparse.ArgumentParser(
         description=f"CSE - PagerDuty Incidents Resolved By v{__version__}",
         formatter_class=WideHelpFormatter,

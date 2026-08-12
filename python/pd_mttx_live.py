@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 def parse_lookback_span(span_str: str) -> timedelta:
-    """Parses dynamic lookback strings (e.g., '2d', '3w', '1m', '1y') into a timedelta[cite: 12]."""
+    """Parses dynamic lookback strings (e.g., '2d', '3w', '1m', '1y') into a timedelta."""
     match = re.match(r"^(\d+)([dwmy])$", span_str.strip().lower())
     if not match:
         raise ValueError(
@@ -42,7 +42,7 @@ def parse_lookback_span(span_str: str) -> timedelta:
 
 
 def parse_timezone(tz_str: str) -> tzinfo:
-    """Parses timezone strings into tzinfo objects (supports UTC, offsets like +05:00/-08:00, or IANA names)[cite: 12]."""
+    """Parses timezone strings into tzinfo objects (supports UTC, offsets like +05:00/-08:00, or IANA names)."""
     tz_str = tz_str.strip()
     if tz_str.upper() in ("UTC", "Z"):
         return timezone.utc
@@ -66,7 +66,7 @@ def parse_timezone(tz_str: str) -> tzinfo:
 
 
 class ThreadSafeRateLimiter:
-    """Thread-safe rate limiter for client-side request throttling[cite: 12]."""
+    """Thread-safe rate limiter for client-side request throttling."""
 
     def __init__(self, requests_per_second: int = 4):
         self.min_interval = 1.0 / requests_per_second
@@ -74,7 +74,7 @@ class ThreadSafeRateLimiter:
         self.lock = threading.Lock()
 
     def acquire(self) -> None:
-        """Wait if necessary to respect rate limits[cite: 12]."""
+        """Wait if necessary to respect rate limits."""
         with self.lock:
             current_time = time.time()
             time_since_last = current_time - self.last_request_time
@@ -86,7 +86,7 @@ class ThreadSafeRateLimiter:
 
 
 class PagerDutyExporter:
-    """PagerDuty REST API v2 client for exporting incident MTTA/MTTR metrics[cite: 12]."""
+    """PagerDuty REST API v2 client for exporting incident MTTA/MTTR metrics."""
 
     def __init__(self, api_token: str, rate_limit: int = 4):
         if not api_token or not api_token.strip():
@@ -111,7 +111,7 @@ class PagerDutyExporter:
     def _make_request(
         self, method: str, endpoint: str, params: Optional[Dict] = None
     ) -> Optional[requests.Response]:
-        """Make an API request with rate limiting and exponential backoff retries[cite: 12]."""
+        """Make an API request with rate limiting and exponential backoff retries."""
         url = f"{self.base_url}/{endpoint}"
 
         for attempt in range(self.max_retries):
@@ -161,7 +161,7 @@ class PagerDutyExporter:
         return None
 
     def validate_token(self) -> bool:
-        """Validate API token credentials against the `/users` endpoint[cite: 12]."""
+        """Validate API token credentials against the `/users` endpoint."""
         logger.info("Validating API token...")
         response = self._make_request("GET", "users", params={"limit": 1})
         if response is not None and response.status_code == 200:
@@ -172,7 +172,7 @@ class PagerDutyExporter:
     def get_incidents(
         self, since: Optional[str] = None, until: Optional[str] = None, time_zone: str = "UTC"
     ) -> List[Dict]:
-        """Fetch resolved incidents using natively evaluated timezone windows[cite: 12]."""
+        """Fetch resolved incidents using natively evaluated timezone windows."""
         incidents = []
         offset = 0
         limit = 100
@@ -211,7 +211,7 @@ class PagerDutyExporter:
         return incidents
 
     def get_service_name(self, service_id: str) -> str:
-        """Fetch service name with local memory caching to avoid redundant API queries[cite: 12]."""
+        """Fetch service name with local memory caching to avoid redundant API queries."""
         if service_id in self.service_cache:
             return self.service_cache[service_id]
 
@@ -225,7 +225,7 @@ class PagerDutyExporter:
         return "Unknown Service"
 
     def get_incident_log_entries(self, incident_id: str, time_zone: str = "UTC") -> List[Dict]:
-        """Fetch all log entries for a specific incident natively offset to target timezone[cite: 12]."""
+        """Fetch all log entries for a specific incident natively offset to target timezone."""
         params = {"time_zone": time_zone}
         response = self._make_request("GET", f"incidents/{incident_id}/log_entries", params=params)
         if response and response.status_code == 200:
@@ -235,7 +235,7 @@ class PagerDutyExporter:
     def calculate_time_metrics(
         self, incident: Dict, log_entries: List[Dict]
     ) -> Dict:
-        """Calculate MTTA and MTTR metrics using first acknowledgment time[cite: 12]."""
+        """Calculate MTTA and MTTR metrics using first acknowledgment time."""
         created_at_dt = datetime.fromisoformat(
             incident["created_at"].replace("Z", "+00:00")
         )
@@ -285,7 +285,7 @@ class PagerDutyExporter:
 
     @staticmethod
     def _format_timedelta(td: Optional[timedelta]) -> str:
-        """Format timedelta into HH:MM:SS string[cite: 12]."""
+        """Format timedelta into HH:MM:SS string."""
         if not td:
             return "N/A"
 
@@ -297,7 +297,7 @@ class PagerDutyExporter:
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
     def process_single_incident(self, incident: Dict, time_zone: str = "UTC") -> Optional[Dict]:
-        """Process a single incident and extract natively formatted MTTA/MTTR metrics[cite: 12]."""
+        """Process a single incident and extract natively formatted MTTA/MTTR metrics."""
         try:
             target_tz = parse_timezone(time_zone)
             log_entries = self.get_incident_log_entries(incident["id"], time_zone=time_zone)
@@ -349,7 +349,7 @@ def export_to_csv(
     prefix: Optional[str] = None,
     default_prefix: str = "pagerduty_metrics"
 ) -> Optional[str]:
-    """Exports processed incident metrics to a safely versioned timestamped CSV file[cite: 12]."""
+    """Exports processed incident metrics to a safely versioned timestamped CSV file."""
     if not data:
         logger.info("No data available to export.")
         return None
@@ -387,14 +387,14 @@ def export_to_csv(
 
 
 class WideHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
-    """Custom help formatter providing extended spacing for flag alignment[cite: 12]."""
+    """Custom help formatter providing extended spacing for flag alignment."""
 
     def __init__(self, prog: str):
         super().__init__(prog, max_help_position=40, width=110)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Builds CLI options with explicit default, relative lookback, and custom timezone options[cite: 12]."""
+    """Builds CLI options with explicit default, relative lookback, and custom timezone options."""
     parser = argparse.ArgumentParser(
         description=f"CSE - PagerDuty Incident MTTA/MTTR Metrics Live (SLOW) v{__version__}",
         formatter_class=WideHelpFormatter,

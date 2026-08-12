@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 def parse_lookback_span(span_str: str) -> timedelta:
-    """Parses dynamic lookback strings (e.g., '2d', '3w', '1m', '1y') into a timedelta[cite: 19]."""
+    """Parses dynamic lookback strings (e.g., '2d', '3w', '1m', '1y') into a timedelta."""
     match = re.match(r"^(\d+)([dwmy])$", span_str.strip().lower())
     if not match:
         raise ValueError(
@@ -41,7 +41,7 @@ def parse_lookback_span(span_str: str) -> timedelta:
 
 
 def parse_timezone(tz_str: str) -> tzinfo:
-    """Parses timezone strings into tzinfo objects (supports UTC, offsets like +05:00/-08:00, or IANA names)[cite: 19]."""
+    """Parses timezone strings into tzinfo objects (supports UTC, offsets like +05:00/-08:00, or IANA names)."""
     tz_str = tz_str.strip()
     if tz_str.upper() in ("UTC", "Z"):
         return timezone.utc
@@ -65,7 +65,7 @@ def parse_timezone(tz_str: str) -> tzinfo:
 
 
 class PagerDutyAPI:
-    """PagerDuty REST API v2 Client with dynamic rate-limit handling and resource resolution[cite: 19]."""
+    """PagerDuty REST API v2 Client with dynamic rate-limit handling and resource resolution."""
 
     def __init__(self, api_token: str):
         if not api_token:
@@ -83,7 +83,7 @@ class PagerDutyAPI:
         )
 
     def _handle_rate_limits(self, response: requests.Response) -> None:
-        """Handles dynamic API rate limits based on response headers[cite: 19]."""
+        """Handles dynamic API rate limits based on response headers."""
         remaining = int(response.headers.get("X-Rate-Limit-Remaining", 400))
         if remaining <= 1:
             wait_time = max(int(response.headers.get("X-Rate-Limit-Reset", 1)), 1)
@@ -93,7 +93,7 @@ class PagerDutyAPI:
     def _request(
         self, url: str, params: Optional[Dict] = None, max_retries: int = 3
     ) -> Optional[requests.Response]:
-        """Makes an HTTP GET request with retry backoff and header-based rate limiting[cite: 19]."""
+        """Makes an HTTP GET request with retry backoff and header-based rate limiting."""
         retry_count = 0
         while retry_count < max_retries:
             try:
@@ -133,7 +133,7 @@ class PagerDutyAPI:
         return None
 
     def resolve_service_identifiers(self, identifiers: List[str]) -> List[str]:
-        """Translates a mix of Service Names and IDs into pure Service IDs[cite: 19]."""
+        """Translates a mix of Service Names and IDs into pure Service IDs."""
         resolved_ids = []
         for identifier in identifiers:
             if len(identifier) == 7 and identifier.startswith("P"):
@@ -157,7 +157,7 @@ class PagerDutyAPI:
     def fetch_resolved_incidents(
         self, since: str, until: str, service_ids: Optional[List[str]] = None, time_zone: str = "UTC"
     ) -> List[Dict[str, Any]]:
-        """Fetches resolved incidents using 6-month chunking natively evaluated by time_zone[cite: 19]."""
+        """Fetches resolved incidents using 6-month chunking natively evaluated by time_zone."""
         all_incidents = []
         
         def parse_dt(d_str: str) -> datetime:
@@ -232,7 +232,7 @@ class PagerDutyAPI:
 
 
 class MTTRAnalyzer:
-    """Analyzes incidents to calculate MTTR metrics[cite: 19]."""
+    """Analyzes incidents to calculate MTTR metrics."""
 
     @staticmethod
     def format_time(seconds: float) -> str:
@@ -305,7 +305,7 @@ class MTTRAnalyzer:
 
 
 def format_period_datetime(dt_str: str, tz: tzinfo) -> str:
-    """Formats period date string with a colonized UTC offset[cite: 19]."""
+    """Formats period date string with a colonized UTC offset."""
     if not dt_str:
         return dt_str
     try:
@@ -336,7 +336,7 @@ def export_to_csv(
     prefix: Optional[str] = None, 
     default_prefix: str = "pagerduty_mttr_analysis"
 ) -> str:
-    """Exports structured MTTR statistics to a safely versioned timestamped CSV[cite: 18, 19]."""
+    """Exports structured MTTR statistics to a safely versioned timestamped CSV."""
     resolved_prefix = prefix or os.environ.get("OUTPUT_FILE") or default_prefix
 
     if resolved_prefix.endswith(".csv"):
@@ -394,14 +394,14 @@ def export_to_csv(
 
 
 class WideHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
-    """Custom help formatter providing extended spacing for flag alignment[cite: 19]."""
+    """Custom help formatter providing extended spacing for flag alignment."""
 
     def __init__(self, prog: str):
         super().__init__(prog, max_help_position=40, width=110)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Builds CLI options with explicit default, relative lookback, and custom timezone options[cite: 19]."""
+    """Builds CLI options with explicit default, relative lookback, and custom timezone options."""
     parser = argparse.ArgumentParser(
         description=f"PagerDuty MTTR Analyzer v{__version__}",
         formatter_class=WideHelpFormatter,
