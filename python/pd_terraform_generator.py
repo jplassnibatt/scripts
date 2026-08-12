@@ -4,14 +4,14 @@ CSE - PagerDuty Terraform Import Generator
 Fetches resources from PagerDuty API v2 and generates Terraform import files.
 
 Installation:
-    chmod +x pd_import.py
+    chmod +x pd_terraform_generator.py
 
 Usage:
-    ./pd_import.py --import
-    ./pd_import.py --execute_plan
-    ./pd_import.py --replace_refs
-    ./pd_import.py --structure
-    ./pd_import.py --cleanup
+    ./pd_terraform_generator.py --import
+    ./pd_terraform_generator.py --execute_plan
+    ./pd_terraform_generator.py --replace_refs
+    ./pd_terraform_generator.py --structure
+    ./pd_terraform_generator.py --cleanup
 
 Requisites:
     - Python 3.8+
