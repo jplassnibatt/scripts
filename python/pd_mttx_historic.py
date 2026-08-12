@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Dict, List, Optional
 import requests
 
-__version__ = "1.4.3"
+__version__ = "1.5.0"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -61,6 +61,22 @@ def parse_timezone(tz_str: str) -> tzinfo:
             f"Invalid timezone identifier: '{tz_str}'. Use IANA format (e.g., 'America/Santiago', 'UTC')."
         )
         sys.exit(1)
+
+
+def apply_default_time_if_missing(date_str: str) -> str:
+    """Stamps a bare 'YYYY-MM-DD' string with midnight (00:00:00). The API evaluates
+    this naive time against the request's own time_zone parameter, so midnight lands
+    on the correct wall-clock offset for whichever timezone is in effect."""
+    candidate = date_str.strip()
+    if "T" in candidate or " " in candidate:
+        return candidate
+
+    try:
+        datetime.strptime(candidate, "%Y-%m-%d")
+    except ValueError:
+        return candidate
+
+    return f"{candidate}T00:00:00"
 
 
 class PagerDutyAnalyticsExporter:
@@ -399,6 +415,9 @@ def main() -> None:
                 "ERROR: You must specify a time range via -d, -l <SPAN>, or -s/-u."
             )
             sys.exit(1)
+
+        since = apply_default_time_if_missing(since)
+        until = apply_default_time_if_missing(until)
 
         logger.info(f"Executing raw API time window: {since} -> {until}")
 
