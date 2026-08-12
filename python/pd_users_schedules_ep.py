@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import requests
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -251,7 +251,7 @@ def process_users_assignments(
 def export_to_csv(
     results: List[Dict], 
     prefix: Optional[str] = None, 
-    default_prefix: str = "pagerduty_user_assignments"
+    default_prefix: str = "pagerduty_users_ep_schedules"
 ) -> Optional[str]:
     """Export user assignment analysis to a dynamic, safely versioned timestamped CSV file."""
     if not results:
@@ -270,6 +270,7 @@ def export_to_csv(
     filename = f"{resolved_prefix}_{timestamp}.csv"
 
     fieldnames = [
+        "User ID",
         "User Name",
         "User Email",
         "User Role",
@@ -286,6 +287,7 @@ def export_to_csv(
         for user in results:
             writer.writerow(
                 {
+                    "User ID": user.get("id", "N/A"),
                     "User Name": user.get("name", "N/A"),
                     "User Email": user.get("email", "N/A"),
                     "User Role": user.get("role", "N/A"),
@@ -323,7 +325,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-o",
         "--output",
-        default="pagerduty_user_assignments",
+        default="pagerduty_users_ep_schedules",
         help="Output CSV filename prefix",
     )
     parser.add_argument(
@@ -377,7 +379,6 @@ def main() -> None:
             api, users, max_workers=args.max_workers
         )
         
-        # Utilize safely isolated output writing
         output_filename = export_to_csv(results, prefix=args.output)
 
         elapsed = time.time() - start_time

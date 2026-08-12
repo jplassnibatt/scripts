@@ -58,7 +58,7 @@ def parse_timezone(tz_str: str) -> tzinfo:
         return ZoneInfo(tz_str)
     except Exception:
         logger.error(
-            f"Invalid timezone identifier: '{tz_str}'. Use IANA format (e.g., 'America/New_York') or offset (e.g., '-05:00', '+02:00', 'UTC')."
+            f"Invalid timezone identifier: '{tz_str}'. Use IANA format (e.g., 'America/Santiago', 'UTC')."
         )
         sys.exit(1)
 
@@ -369,7 +369,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--timezone",
         default="UTC",
         metavar="TZ",
-        help="Custom timezone IANA name for relative calendar calculations (e.g., 'America/New_York', 'UTC')",
+        help="Custom timezone IANA name for relative calendar calculations (e.g., 'America/Santiago', 'UTC')",
     )
     parser.add_argument(
         "--service-id",

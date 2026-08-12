@@ -322,8 +322,8 @@ def export_to_csv(
 
     fieldnames = [
         "User ID",
-        "Name",
-        "Email",
+        "User Name",
+        "User Email",
         "License Name",
         "License Description",
         "Status",
@@ -335,8 +335,8 @@ def export_to_csv(
         for row in users_data:
             mapped_row = {
                 "User ID": row.get("user_id"),
-                "Name": row.get("name"),
-                "Email": row.get("email"),
+                "User Name": row.get("name"),
+                "User Email": row.get("email"),
                 "License Name": row.get("license_name"),
                 "License Description": row.get("license_description"),
                 "Status": row.get("status"),

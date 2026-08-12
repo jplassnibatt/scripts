@@ -11,14 +11,14 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any, Dict, List, Optional
 import requests
 
-__version__ = "1.5.4"
+__version__ = "1.5.5"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
 def parse_lookback_span(span_str: str) -> timedelta:
-    """Parses dynamic lookback strings (e.g., '2d', '3w', '1m', '1y') into a timedelta[cite: 15]."""
+    """Parses dynamic lookback strings (e.g., '2d', '3w', '1m', '1y') into a timedelta[cite: 19]."""
     match = re.match(r"^(\d+)([dwmy])$", span_str.strip().lower())
     if not match:
         raise ValueError(
@@ -41,7 +41,7 @@ def parse_lookback_span(span_str: str) -> timedelta:
 
 
 def parse_timezone(tz_str: str) -> tzinfo:
-    """Parses timezone strings into tzinfo objects (supports UTC, offsets like +05:00/-08:00, or IANA names)[cite: 15]."""
+    """Parses timezone strings into tzinfo objects (supports UTC, offsets like +05:00/-08:00, or IANA names)[cite: 19]."""
     tz_str = tz_str.strip()
     if tz_str.upper() in ("UTC", "Z"):
         return timezone.utc
@@ -59,13 +59,13 @@ def parse_timezone(tz_str: str) -> tzinfo:
         return ZoneInfo(tz_str)
     except Exception:
         logger.error(
-            f"Invalid timezone identifier: '{tz_str}'. Use IANA format (e.g., 'America/New_York', 'UTC')."
+            f"Invalid timezone identifier: '{tz_str}'. Use IANA format (e.g., 'America/Santiago', 'UTC')."
         )
         sys.exit(1)
 
 
 class PagerDutyAPI:
-    """PagerDuty REST API v2 Client with dynamic rate-limit handling and resource resolution[cite: 15, 16]."""
+    """PagerDuty REST API v2 Client with dynamic rate-limit handling and resource resolution[cite: 19]."""
 
     def __init__(self, api_token: str):
         if not api_token:
@@ -83,7 +83,7 @@ class PagerDutyAPI:
         )
 
     def _handle_rate_limits(self, response: requests.Response) -> None:
-        """Handles dynamic API rate limits based on response headers[cite: 15, 16]."""
+        """Handles dynamic API rate limits based on response headers[cite: 19]."""
         remaining = int(response.headers.get("X-Rate-Limit-Remaining", 400))
         if remaining <= 1:
             wait_time = max(int(response.headers.get("X-Rate-Limit-Reset", 1)), 1)
@@ -93,7 +93,7 @@ class PagerDutyAPI:
     def _request(
         self, url: str, params: Optional[Dict] = None, max_retries: int = 3
     ) -> Optional[requests.Response]:
-        """Makes an HTTP GET request with retry backoff and header-based rate limiting[cite: 15, 16]."""
+        """Makes an HTTP GET request with retry backoff and header-based rate limiting[cite: 19]."""
         retry_count = 0
         while retry_count < max_retries:
             try:
@@ -133,7 +133,7 @@ class PagerDutyAPI:
         return None
 
     def resolve_service_identifiers(self, identifiers: List[str]) -> List[str]:
-        """Translates a mix of Service Names and IDs into pure Service IDs[cite: 15, 16]."""
+        """Translates a mix of Service Names and IDs into pure Service IDs[cite: 19]."""
         resolved_ids = []
         for identifier in identifiers:
             if len(identifier) == 7 and identifier.startswith("P"):
@@ -157,10 +157,7 @@ class PagerDutyAPI:
     def fetch_resolved_incidents(
         self, since: str, until: str, service_ids: Optional[List[str]] = None, time_zone: str = "UTC"
     ) -> List[Dict[str, Any]]:
-        """
-        Fetches resolved incidents using 6-month chunking to bypass PagerDuty's
-        maximum date range limits on the /incidents endpoint natively evaluated by time_zone[cite: 15, 16].
-        """
+        """Fetches resolved incidents using 6-month chunking natively evaluated by time_zone[cite: 19]."""
         all_incidents = []
         
         def parse_dt(d_str: str) -> datetime:
@@ -198,7 +195,7 @@ class PagerDutyAPI:
                 "since": chunk_since,
                 "until": chunk_until,
                 "statuses[]": ["resolved"],
-                "time_zone": time_zone,  # Pass timezone natively
+                "time_zone": time_zone,
             }
             if service_ids:
                 params["service_ids[]"] = service_ids
@@ -235,7 +232,7 @@ class PagerDutyAPI:
 
 
 class MTTRAnalyzer:
-    """Analyzes incidents to calculate MTTR metrics[cite: 15, 16]."""
+    """Analyzes incidents to calculate MTTR metrics[cite: 19]."""
 
     @staticmethod
     def format_time(seconds: float) -> str:
@@ -269,7 +266,6 @@ class MTTRAnalyzer:
             if not created_str or not resolved_str:
                 continue
 
-            # Safely parses native offset-aware strings returned natively by the API
             created_at = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
             resolved_at = datetime.fromisoformat(resolved_str.replace("Z", "+00:00"))
             resolution_times.append((resolved_at - created_at).total_seconds())
@@ -309,7 +305,7 @@ class MTTRAnalyzer:
 
 
 def format_period_datetime(dt_str: str, tz: tzinfo) -> str:
-    """Formats period date string with a colonized UTC offset[cite: 15]."""
+    """Formats period date string with a colonized UTC offset[cite: 19]."""
     if not dt_str:
         return dt_str
     try:
@@ -340,15 +336,12 @@ def export_to_csv(
     prefix: Optional[str] = None, 
     default_prefix: str = "pagerduty_mttr_analysis"
 ) -> str:
-    """Exports structured MTTR statistics to a safely versioned timestamped CSV[cite: 15, 16]."""
-    # 1. Resolve fallback hierarchy: Explicit CLI arg -> Environment Var -> Default
+    """Exports structured MTTR statistics to a safely versioned timestamped CSV[cite: 18, 19]."""
     resolved_prefix = prefix or os.environ.get("OUTPUT_FILE") or default_prefix
 
-    # 2. Sanitize extension if user explicitly passed `.csv`
     if resolved_prefix.endswith(".csv"):
         resolved_prefix = resolved_prefix[:-4]
 
-    # 3. Construct dynamic collision-proof timestamped filename
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     filename = f"{resolved_prefix}_{timestamp}.csv"
 
@@ -365,7 +358,6 @@ def export_to_csv(
 
     rows = []
     
-    # Sort alphabetically by service name, appending "Overall Pipeline" at the very bottom
     for service_name, stats in sorted(
         mttr_stats.items(), 
         key=lambda x: (1, "") if x[0] == "Overall Pipeline" else (0, x[0].lower())
@@ -389,8 +381,8 @@ def export_to_csv(
 
     with open(filename, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.writer(csvfile)
-        writer.writerow(["PagerDuty MTTR Analysis Report"])
-        writer.writerow([f"Period ({time_zone}): {display_since} to {display_until}"])
+        writer.writerow(["Time Period Start", display_since])
+        writer.writerow(["Time Period End", display_until])
         writer.writerow([]) 
 
         dict_writer = csv.DictWriter(csvfile, fieldnames=headers)
@@ -402,14 +394,14 @@ def export_to_csv(
 
 
 class WideHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
-    """Custom help formatter providing extended spacing for flag alignment[cite: 15, 16]."""
+    """Custom help formatter providing extended spacing for flag alignment[cite: 19]."""
 
     def __init__(self, prog: str):
         super().__init__(prog, max_help_position=40, width=110)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Builds CLI options with explicit default, relative lookback, and custom timezone options[cite: 15, 16]."""
+    """Builds CLI options with explicit default, relative lookback, and custom timezone options[cite: 19]."""
     parser = argparse.ArgumentParser(
         description=f"PagerDuty MTTR Analyzer v{__version__}",
         formatter_class=WideHelpFormatter,
@@ -439,7 +431,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--timezone",
         default="UTC",
         metavar="TZ",
-        help="Custom timezone IANA name for relative calendar calculations (e.g., 'America/New_York', 'UTC')",
+        help="Custom timezone IANA name for relative calendar calculations (e.g., 'America/Santiago', 'UTC')",
     )
     parser.add_argument(
         "-S",

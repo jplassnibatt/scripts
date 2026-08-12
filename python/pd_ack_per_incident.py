@@ -34,7 +34,7 @@ def parse_timezone(tz_str: str) -> tzinfo:
         return ZoneInfo(tz_str)
     except Exception:
         logger.error(
-            f"Invalid timezone identifier: '{tz_str}'. Use IANA format (e.g., 'America/New_York', 'UTC')."
+            f"Invalid timezone identifier: '{tz_str}'. Use IANA format (e.g., 'America/Santiago', 'UTC')."
         )
         sys.exit(1)
 
@@ -159,7 +159,7 @@ class PagerDutyAcknowledgeExporter:
 def export_to_csv(
     data: List[Dict[str, Any]],
     prefix: Optional[str] = None,
-    default_prefix: str = "pagerduty_incident_acknowledgments",
+    default_prefix: str = "pagerduty_incident_ack",
 ) -> str:
     """Exports structured log data to a safely versioned timestamped CSV file."""
     resolved_prefix = prefix or os.environ.get("OUTPUT_FILE") or default_prefix
@@ -176,8 +176,8 @@ def export_to_csv(
         "Log Entry ID",
         "Acknowledged At",
         "Acknowledged By",
-        "Agent Type",
         "User ID",
+        "Agent Type",
         "Channel Type",
     ]
 
@@ -192,8 +192,8 @@ def export_to_csv(
                     "Log Entry ID": row.get("log_entry_id"),
                     "Acknowledged At": row.get("acknowledged_at"),
                     "Acknowledged By": row.get("acknowledged_by"),
-                    "Agent Type": row.get("agent_type"),
                     "User ID": row.get("user_id"),
+                    "Agent Type": row.get("agent_type"),
                     "Channel Type": row.get("channel_type"),
                 }
                 writer.writerow(mapped_row)
@@ -227,12 +227,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--timezone",
         default="UTC",
         metavar="TZ",
-        help="Custom timezone IANA name (e.g., 'America/New_York', 'UTC')",
+        help="Custom timezone IANA name (e.g., 'America/Santiago', 'UTC')",
     )
     parser.add_argument(
         "-o",
         "--output",
-        default="pagerduty_incident_acknowledgments",
+        default="pagerduty_incident_ack",
         help="Custom CSV filename prefix",
     )
     return parser
