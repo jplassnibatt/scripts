@@ -377,10 +377,10 @@ def main() -> None:
 
     logger.setLevel(logging.INFO if args.debug else logging.WARNING)
 
-    api_token = os.environ.get("PAGERDUTY_API_TOKEN") or os.environ.get("API_TOKEN")
+    api_token = os.environ.get("PAGERDUTY_API_TOKEN")
     if not api_token:
         logger.error(
-            "ERROR: Missing API token. Export PAGERDUTY_API_TOKEN environment variable."
+            "Set it using: export PAGERDUTY_API_TOKEN='your-api-token-here'"
         )
         sys.exit(1)
 

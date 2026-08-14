@@ -21,7 +21,6 @@ Requisites:
 """
 
 import argparse
-import csv
 import glob
 import json
 import logging
@@ -33,14 +32,16 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from functools import lru_cache, wraps
+from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+import requests
 
 # ============================================================================
 # CONFIGURATION & CONSTANTS
 # ============================================================================
 
-__version__ = "2.2.1"
+__version__ = "2.2.2"
 SCRIPT_NAME = os.path.basename(sys.argv[0])
 
 BASE_URL = "https://api.pagerduty.com"
@@ -817,12 +818,9 @@ RESOURCE_DEPENDENCIES = {
 # HELPER FUNCTIONS
 # ============================================================================
 
-@lru_cache(maxsize=1024)
-def get_nested_value(obj_json: str, path: str) -> Any:
-    obj = json.loads(obj_json)
-    keys = path.split(".")
+def get_nested_value(obj: Dict, path: str) -> Any:
     value = obj
-    for key in keys:
+    for key in path.split("."):
         if isinstance(value, dict):
             value = value.get(key, "")
         else:
@@ -852,9 +850,8 @@ def generate_resource_name(resource: Dict, naming_field: str, skip_sanitization:
     if "+" in naming_field:
         parts = naming_field.split("+")
         name_parts = []
-        resource_json = json.dumps(resource, sort_keys=True)
         for part in parts:
-            value = get_nested_value(resource_json, part)
+            value = get_nested_value(resource, part)
             if value:
                 name_parts.append(str(value))
         combined_name = "_".join(name_parts)
@@ -864,8 +861,7 @@ def generate_resource_name(resource: Dict, naming_field: str, skip_sanitization:
             return combined_name
         return sanitize_name(combined_name)
 
-    resource_json = json.dumps(resource, sort_keys=True)
-    value = get_nested_value(resource_json, naming_field)
+    value = get_nested_value(resource, naming_field)
     if skip_sanitization:
         value_str = str(value)
         if value_str and not value_str[0].isalpha():
@@ -878,10 +874,9 @@ def format_import_id(resource: Dict, id_format: str) -> str:
     if not id_format:
         return resource.get("id", "")
     import_id = id_format
-    resource_json = json.dumps(resource, sort_keys=True)
     placeholders = re.findall(r"\{([^}]+)\}", id_format)
     for placeholder in placeholders:
-        value = get_nested_value(resource_json, placeholder)
+        value = get_nested_value(resource, placeholder)
         import_id = import_id.replace(f"{{{placeholder}}}", str(value))
     return import_id
 
@@ -1018,7 +1013,7 @@ def run_import() -> None:
     logger.info("MODE: Import - Fetching from PagerDuty API")
     logger.info("=" * 80)
 
-    api_token = os.environ.get("PAGERDUTY_API_TOKEN") or os.environ.get("API_TOKEN")
+    api_token = os.environ.get("PAGERDUTY_API_TOKEN")
     if not api_token or api_token == "YOUR_PAGERDUTY_API_TOKEN_HERE":
         logger.error("\n❌ ERROR: Missing API token. Export PAGERDUTY_API_TOKEN environment variable.")
         sys.exit(1)
