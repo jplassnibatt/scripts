@@ -14,7 +14,11 @@ import requests
 
 __version__ = "1.6.0"
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
 logger = logging.getLogger(__name__)
 
 
@@ -79,6 +83,28 @@ def apply_default_time_if_missing(date_str: str) -> str:
         return candidate
 
     return f"{candidate}T00:00:00"
+
+
+def format_datetime(dt_str: Optional[str]) -> str:
+    """Reformats an ISO 8601 timestamp for display: 'T' becomes a space, and a missing
+    offset (naive or 'Z') is made explicit as '+00:00' (UTC). The offset, if any, is
+    taken as-is from the API response with no conversion applied."""
+    if not dt_str or dt_str == "N/A":
+        return dt_str or ""
+    match = re.match(
+        r"^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?$",
+        dt_str.strip(),
+    )
+    if not match:
+        return dt_str
+
+    date_part, time_part, offset = match.groups()
+    if not offset or offset == "Z":
+        offset = "+00:00"
+    elif ":" not in offset:
+        offset = f"{offset[:3]}:{offset[3:]}"
+
+    return f"{date_part} {time_part} {offset}"
 
 
 class ThreadSafeRateLimiter:
@@ -186,14 +212,15 @@ class PagerDutyExporter:
         return False
 
     def get_incidents(
-        self, since: Optional[str] = None, until: Optional[str] = None, time_zone: str = "UTC"
+        self, since: Optional[str] = None, until: Optional[str] = None, time_zone: Optional[str] = None
     ) -> List[Dict]:
-        """Fetch resolved incidents using natively evaluated timezone windows."""
+        """Fetch resolved incidents using natively evaluated timezone windows when a time_zone is
+        provided; otherwise the account's default time zone governs interpretation."""
         incidents = []
         offset = 0
         limit = 100
 
-        logger.info(f"Fetching resolved incidents from native API window: {since or 'Beginning'} -> {until or 'Now'} (TZ: {time_zone})")
+        logger.info(f"Fetching resolved incidents from native API window: {since or 'Beginning'} -> {until or 'Now'} (TZ: {time_zone or 'account default'})")
 
         while True:
             params = {
@@ -201,8 +228,9 @@ class PagerDutyExporter:
                 "limit": limit,
                 "offset": offset,
                 "total": True,
-                "time_zone": time_zone,
             }
+            if time_zone:
+                params["time_zone"] = time_zone
             if since:
                 params["since"] = since
             if until:
@@ -240,9 +268,10 @@ class PagerDutyExporter:
 
         return "Unknown Service"
 
-    def get_incident_log_entries(self, incident_id: str, time_zone: str = "UTC") -> List[Dict]:
-        """Fetch all log entries for a specific incident natively offset to target timezone."""
-        params = {"time_zone": time_zone}
+    def get_incident_log_entries(self, incident_id: str, time_zone: Optional[str] = None) -> List[Dict]:
+        """Fetch all log entries for a specific incident, natively offset to the target timezone
+        when provided; otherwise the account's default time zone governs interpretation."""
+        params = {"time_zone": time_zone} if time_zone else {}
         response = self._make_request("GET", f"incidents/{incident_id}/log_entries", params=params)
         if response and response.status_code == 200:
             return response.json().get("log_entries", [])
@@ -312,10 +341,9 @@ class PagerDutyExporter:
 
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
-    def process_single_incident(self, incident: Dict, time_zone: str = "UTC") -> Optional[Dict]:
+    def process_single_incident(self, incident: Dict, time_zone: Optional[str] = None) -> Optional[Dict]:
         """Process a single incident and extract natively formatted MTTA/MTTR metrics."""
         try:
-            target_tz = parse_timezone(time_zone)
             log_entries = self.get_incident_log_entries(incident["id"], time_zone=time_zone)
             metrics = self.calculate_time_metrics(incident, log_entries)
 
@@ -325,24 +353,7 @@ class PagerDutyExporter:
                 self.get_service_name(service_id) if service_id else "Unknown Service"
             )
 
-            # Natively format the offset-aware string provided by the API with colonized offset
-            created_at_raw = incident.get("created_at", "N/A")
-            if created_at_raw != "N/A":
-                try:
-                    dt = datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=target_tz)
-                    else:
-                        dt = dt.astimezone(target_tz)
-
-                    formatted = dt.strftime("%Y-%m-%d %H:%M:%S %z")
-                    if len(formatted) > 5 and formatted[-5] in ('+', '-'):
-                        formatted = formatted[:-2] + ":" + formatted[-2:]
-                    created_at_local = formatted
-                except Exception:
-                    created_at_local = created_at_raw
-            else:
-                created_at_local = "N/A"
+            created_at_local = format_datetime(incident.get("created_at", "N/A"))
 
             return {
                 "Incident ID": incident.get("id", "N/A"),
@@ -438,9 +449,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-t",
         "--timezone",
-        default="UTC",
+        default=None,
         metavar="TZ",
-        help="Custom timezone IANA name for relative calendar calculations (e.g., 'America/Santiago', 'UTC')",
+        help="Custom timezone IANA name (e.g., 'America/Santiago', 'UTC'). If omitted, dates are "
+        "interpreted using the account's default time zone and output timestamps are rendered "
+        "in UTC without an offset",
     )
     parser.add_argument(
         "-o", "--output", help="Custom CSV filename prefix"
@@ -459,6 +472,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=4,
         help="Maximum API requests per second",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show detailed [INFO] level log messages",
+    )
     return parser
 
 
@@ -471,6 +489,8 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    logger.setLevel(logging.INFO if args.debug else logging.WARNING)
+
     api_token = os.environ.get("PAGERDUTY_API_TOKEN") or os.environ.get("API_TOKEN")
     if not api_token or api_token.strip() == "YOUR_API_TOKEN_HERE":
         logger.error(
@@ -482,8 +502,8 @@ def main() -> None:
         logger.error("Max workers must be between 1 and 10.")
         sys.exit(1)
 
-    target_tz = parse_timezone(args.timezone)
-    now_local = datetime.now(target_tz)
+    target_tz = parse_timezone(args.timezone) if args.timezone else None
+    now_local = datetime.now(target_tz or timezone.utc)
 
     since, until = None, None
 

@@ -6,53 +6,39 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timedelta, timezone, tzinfo
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 import requests
 
 __version__ = "1.3.0"
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
 logger = logging.getLogger(__name__)
 
-def parse_timezone(tz_str: str) -> tzinfo:
-    """Parses timezone strings into tzinfo objects (supports UTC, offsets like +05:00/-08:00, or IANA names)."""
-    tz_str = tz_str.strip()
-    if tz_str.upper() in ("UTC", "Z"):
-        return timezone.utc
-
-    offset_match = re.match(r"^([+-])(\d{2}):?(\d{2})$", tz_str)
-    if offset_match:
-        sign, hours, minutes = offset_match.groups()
-        total_minutes = int(hours) * 60 + int(minutes)
-        if sign == "-":
-            total_minutes = -total_minutes
-        return timezone(timedelta(minutes=total_minutes))
-
-    try:
-        from zoneinfo import ZoneInfo
-        return ZoneInfo(tz_str)
-    except Exception:
-        logger.error(
-            f"Invalid timezone identifier: '{tz_str}'. Use IANA format (e.g., 'America/Santiago', 'UTC')."
-        )
-        sys.exit(1)
-
 def format_datetime(dt_str: Optional[str]) -> str:
-    """Formats ISO datetime string from natively localized API responses with a colonized offset."""
+    """Reformats an ISO 8601 timestamp for display: 'T' becomes a space, and a missing
+    offset (naive or 'Z') is made explicit as '+00:00' (UTC). The offset, if any, is
+    taken as-is from the API response with no conversion applied."""
     if not dt_str:
         return ""
-    try:
-        dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
-        
-        # Native %z produces '+0000' or '-0400'. We slice the string to inject the colon.
-        formatted = dt.strftime("%Y-%m-%d %H:%M:%S %z")
-        if len(formatted) > 5 and formatted[-5] in ('+', '-'):
-            formatted = formatted[:-2] + ":" + formatted[-2:]
-            
-        return formatted
-    except Exception:
+    match = re.match(
+        r"^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?$",
+        dt_str.strip(),
+    )
+    if not match:
         return dt_str
+
+    date_part, time_part, offset = match.groups()
+    if not offset or offset == "Z":
+        offset = "+00:00"
+    elif ":" not in offset:
+        offset = f"{offset[:3]}:{offset[3:]}"
+
+    return f"{date_part} {time_part} {offset}"
 
 class PagerDutyAcknowledgeExporter:
     """PagerDuty REST API v2 client for retrieving incident acknowledgment logs."""
@@ -114,9 +100,14 @@ class PagerDutyAcknowledgeExporter:
             return True
         return False
 
-    def fetch_acknowledgments(self, incident_id: str, time_zone: str = "UTC") -> List[Dict[str, Any]]:
-        """Fetches all acknowledgment log entries natively offset to target timezone."""
-        logger.info(f"Fetching log entries for Incident ID: {incident_id} (TZ: {time_zone})...")
+    def fetch_acknowledgments(
+        self,
+        incident_id: str,
+        time_zone: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Fetches all acknowledgment log entries, natively offset to the target timezone
+        when provided; otherwise the account's default time zone governs interpretation."""
+        logger.info(f"Fetching log entries for Incident ID: {incident_id} (TZ: {time_zone or 'account default'})...")
 
         url = f"{self.base_url}/incidents/{incident_id}/log_entries"
         offset = 0
@@ -128,8 +119,9 @@ class PagerDutyAcknowledgeExporter:
                 "offset": offset,
                 "limit": limit,
                 "include[]": ["users", "channels"],
-                "time_zone": time_zone,  # Pass timezone natively
             }
+            if time_zone:
+                params["time_zone"] = time_zone
 
             response = self._request(url, params=params)
             if not response:
@@ -234,15 +226,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-t",
         "--timezone",
-        default="UTC",
+        default=None,
         metavar="TZ",
-        help="Custom timezone IANA name (e.g., 'America/Santiago', 'UTC')",
+        help="Custom timezone IANA name (e.g., 'America/Santiago', 'UTC'). If omitted, dates are "
+        "interpreted using the account's default time zone and output timestamps are rendered "
+        "in UTC without an offset",
     )
     parser.add_argument(
         "-o",
         "--output",
         default="pagerduty_incident_ack",
         help="Custom CSV filename prefix",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show detailed [INFO] level log messages",
     )
     return parser
 
@@ -255,14 +254,14 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    logger.setLevel(logging.INFO if args.debug else logging.WARNING)
+
     api_token = os.environ.get("PAGERDUTY_API_TOKEN") or os.environ.get("API_TOKEN")
     if not api_token or api_token.strip() == "YOUR_API_TOKEN":
         logger.error(
             "ERROR: Missing API token. Export the PAGERDUTY_API_TOKEN environment variable."
         )
         sys.exit(1)
-
-    target_tz = parse_timezone(args.timezone)
 
     try:
         exporter = PagerDutyAcknowledgeExporter(api_token)
@@ -271,8 +270,10 @@ def main() -> None:
 
         start_time = time.time()
 
-        ack_entries = exporter.fetch_acknowledgments(args.incident_id, time_zone=args.timezone)
-        
+        ack_entries = exporter.fetch_acknowledgments(
+            args.incident_id, time_zone=args.timezone
+        )
+
         # Call export_to_csv without the time_zone argument
         output_file = export_to_csv(ack_entries, prefix=args.output)
 

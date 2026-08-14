@@ -14,7 +14,11 @@ import requests
 
 __version__ = "1.6.0"
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
 logger = logging.getLogger(__name__)
 
 
@@ -186,10 +190,11 @@ class PagerDutyAPI:
         return None
 
     def fetch_resolved_incidents_raw(
-        self, since: Optional[str] = None, until: Optional[str] = None, service_ids: Optional[List[str]] = None, time_zone: str = "UTC"
+        self, since: Optional[str] = None, until: Optional[str] = None, service_ids: Optional[List[str]] = None, time_zone: Optional[str] = None
     ) -> List[Dict]:
-        """Fetch resolved incidents (pagination only) natively evaluated by PagerDuty's time_zone handler."""
-        logger.info(f"Fetching resolved incidents from native API window: {since or 'Beginning'} -> {until or 'Now'} (TZ: {time_zone})")
+        """Fetch resolved incidents (pagination only), natively evaluated by PagerDuty's time_zone
+        handler when provided; otherwise the account's default time zone governs interpretation."""
+        logger.info(f"Fetching resolved incidents from native API window: {since or 'Beginning'} -> {until or 'Now'} (TZ: {time_zone or 'account default'})")
         if service_ids:
             logger.info(f"Filtering by service IDs: {', '.join(service_ids)}")
 
@@ -203,8 +208,9 @@ class PagerDutyAPI:
                 "offset": offset,
                 "limit": limit,
                 "include[]": ["users"],
-                "time_zone": time_zone,
             }
+            if time_zone:
+                params["time_zone"] = time_zone
 
             if since:
                 params["since"] = since
@@ -229,12 +235,14 @@ class PagerDutyAPI:
         logger.info(f"✓ Retrieved {len(incidents)} resolved incidents")
         return incidents
 
-    def enrich_incident_with_resolver(self, incident: Dict, time_zone: str = "UTC") -> Dict:
+    def enrich_incident_with_resolver(self, incident: Dict, time_zone: Optional[str] = None) -> Dict:
         """Fetch log entries for a single incident and identify who resolved it."""
         resolver = None
         resolver_details = None
 
-        log_params = {"include[]": ["users"], "is_overview": "true", "time_zone": time_zone}
+        log_params = {"include[]": ["users"], "is_overview": "true"}
+        if time_zone:
+            log_params["time_zone"] = time_zone
         log_response = self._request(
             f"{self.base_url}/incidents/{incident['id']}/log_entries",
             params=log_params,
@@ -282,7 +290,7 @@ class PagerDutyAPI:
         since: Optional[str] = None,
         until: Optional[str] = None,
         service_ids: Optional[List[str]] = None,
-        time_zone: str = "UTC",
+        time_zone: Optional[str] = None,
         max_workers: int = 5,
     ) -> List[Dict]:
         """Fetch resolved incidents and enrich each with resolver details concurrently."""
@@ -317,29 +325,30 @@ class PagerDutyAPI:
         return incidents
 
 
-def format_datetime(dt_str: str, target_tz: Optional[tzinfo] = None) -> str:
-    """Formats ISO datetime string from natively localized API responses with a colonized offset."""
+def format_datetime(dt_str: str) -> str:
+    """Reformats an ISO 8601 timestamp for display: 'T' becomes a space, and a missing
+    offset (naive or 'Z') is made explicit as '+00:00' (UTC). The offset, if any, is
+    taken as-is from the API response with no conversion applied."""
     if not dt_str or dt_str == "N/A":
         return dt_str
-    try:
-        dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
-        if target_tz:
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=target_tz)
-            else:
-                dt = dt.astimezone(target_tz)
-
-        formatted = dt.strftime("%Y-%m-%d %H:%M:%S %z")
-        if len(formatted) > 5 and formatted[-5] in ("+", "-"):
-            formatted = formatted[:-2] + ":" + formatted[-2:]
-        return formatted.strip()
-    except Exception:
+    match = re.match(
+        r"^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?$",
+        dt_str.strip(),
+    )
+    if not match:
         return dt_str
+
+    date_part, time_part, offset = match.groups()
+    if not offset or offset == "Z":
+        offset = "+00:00"
+    elif ":" not in offset:
+        offset = f"{offset[:3]}:{offset[3:]}"
+
+    return f"{date_part} {time_part} {offset}"
 
 
 def export_to_csv(
     incidents: List[Dict],
-    target_tz: tzinfo,
     prefix: Optional[str] = None,
     default_prefix: str = "pagerduty_resolved_incidents"
 ) -> Optional[str]:
@@ -380,8 +389,8 @@ def export_to_csv(
                     "Incident Number": incident.get("incident_number", "N/A"),
                     "Incident ID": incident.get("incident_id", "N/A"),
                     "Incident Title": incident.get("title", "N/A"),
-                    "Created At": format_datetime(incident.get("created_at", ""), target_tz),
-                    "Resolved At": format_datetime(incident.get("resolved_at", ""), target_tz),
+                    "Created At": format_datetime(incident.get("created_at", "")),
+                    "Resolved At": format_datetime(incident.get("resolved_at", "")),
                     "Resolver Name": resolver.get("name", "Unknown"),
                     "Resolver Email": resolver.get("email", "Unknown"),
                     "Resolver ID": resolver.get("id", "Unknown"),
@@ -431,9 +440,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-t",
         "--timezone",
-        default="UTC",
+        default=None,
         metavar="TZ",
-        help="Custom timezone IANA name for relative calendar calculations (e.g., 'America/Santiago', 'UTC')",
+        help="Custom timezone IANA name (e.g., 'America/Santiago', 'UTC'). If omitted, dates are "
+        "interpreted using the account's default time zone and output timestamps are rendered "
+        "in UTC without an offset",
     )
     parser.add_argument(
         "--service-id",
@@ -458,6 +469,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=5,
         help="Maximum concurrent worker threads for resolver lookups",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show detailed [INFO] level log messages",
+    )
     return parser
 
 
@@ -470,6 +486,8 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    logger.setLevel(logging.INFO if args.debug else logging.WARNING)
+
     api_token = os.environ.get("PAGERDUTY_API_TOKEN") or os.environ.get("API_TOKEN")
     if not api_token or api_token.strip() == "YOUR_API_TOKEN_HERE":
         logger.error(
@@ -477,8 +495,8 @@ def main() -> None:
         )
         sys.exit(1)
 
-    target_tz = parse_timezone(args.timezone)
-    now_local = datetime.now(target_tz)
+    target_tz = parse_timezone(args.timezone) if args.timezone else None
+    now_local = datetime.now(target_tz or timezone.utc)
 
     since, until = None, None
 
@@ -540,10 +558,11 @@ def main() -> None:
             logger.warning("No resolved incidents found matching the criteria.")
             sys.exit(0)
 
-        output_filename = export_to_csv(incidents, target_tz=target_tz, prefix=args.output)
+        output_filename = export_to_csv(incidents, prefix=args.output)
 
         elapsed = time.time() - start_time
         print(f"\n{'='*60}")
+        print(f"Time Window ({args.timezone or 'account default'}): {since or 'Beginning'} -> {until or 'Now'}")
         print(f"✓ Processed {len(incidents)} resolved incidents in {elapsed:.2f}s")
         print(f"✓ Output file: {output_filename or 'N/A'}")
         print(f"{'='*60}\n")

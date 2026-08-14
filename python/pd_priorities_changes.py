@@ -15,7 +15,11 @@ import requests
 
 __version__ = "1.6.0"
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
 logger = logging.getLogger(__name__)
 
 
@@ -80,6 +84,28 @@ def apply_default_time_if_missing(date_str: str) -> str:
         return candidate
 
     return f"{candidate}T00:00:00"
+
+
+def format_datetime(dt_str: Optional[str]) -> str:
+    """Reformats an ISO 8601 timestamp for display: 'T' becomes a space, and a missing
+    offset (naive or 'Z') is made explicit as '+00:00' (UTC). The offset, if any, is
+    taken as-is from the API response with no conversion applied."""
+    if not dt_str:
+        return dt_str or ""
+    match = re.match(
+        r"^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?$",
+        dt_str.strip(),
+    )
+    if not match:
+        return dt_str
+
+    date_part, time_part, offset = match.groups()
+    if not offset or offset == "Z":
+        offset = "+00:00"
+    elif ":" not in offset:
+        offset = f"{offset[:3]}:{offset[3:]}"
+
+    return f"{date_part} {time_part} {offset}"
 
 
 @dataclass
@@ -205,13 +231,16 @@ class PagerDutyAPI:
         return all_data
 
     def fetch_resolved_incidents(
-        self, since: Optional[str] = None, until: Optional[str] = None, time_zone: str = "UTC"
+        self, since: Optional[str] = None, until: Optional[str] = None, time_zone: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        """Fetches resolved incidents using natively evaluated timezone windows."""
+        """Fetches resolved incidents using natively evaluated timezone windows when a time_zone is
+        provided; otherwise the account's default time zone governs interpretation."""
         logger.info(
-            f"Fetching resolved incidents: {since or 'Beginning'} -> {until or 'Now'} (TZ: {time_zone})"
+            f"Fetching resolved incidents: {since or 'Beginning'} -> {until or 'Now'} (TZ: {time_zone or 'account default'})"
         )
-        params = {"statuses[]": "resolved", "time_zone": time_zone}
+        params = {"statuses[]": "resolved"}
+        if time_zone:
+            params["time_zone"] = time_zone
         if since:
             params["since"] = since
         if until:
@@ -223,12 +252,13 @@ class PagerDutyAPI:
         logger.info(f"✓ Retrieved {len(incidents)} resolved incidents")
         return incidents
 
-    def fetch_log_entries(self, incident_id: str, time_zone: str = "UTC") -> List[Dict[str, Any]]:
-        """Fetches log entries for a single incident natively offset to target timezone."""
+    def fetch_log_entries(self, incident_id: str, time_zone: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Fetches log entries for a single incident, natively offset to the target timezone
+        when provided; otherwise the account's default time zone governs interpretation."""
         return self.fetch_paginated_data(
             f"{self.base_url}/incidents/{incident_id}/log_entries",
             key="log_entries",
-            params={"time_zone": time_zone}
+            params={"time_zone": time_zone} if time_zone else {}
         )
 
 
@@ -311,9 +341,8 @@ class PriorityAnalyzer:
 
     @classmethod
     def process_incident(
-        cls, api: PagerDutyAPI, incident: Dict[str, Any], time_zone: str = "UTC"
+        cls, api: PagerDutyAPI, incident: Dict[str, Any], time_zone: Optional[str] = None
     ) -> List[PriorityChange]:
-        target_tz = parse_timezone(time_zone)
         log_entries = sorted(
             api.fetch_log_entries(incident["id"], time_zone=time_zone),
             key=lambda x: x.get("created_at", ""),
@@ -356,22 +385,7 @@ class PriorityAnalyzer:
                     )
                     
                     created_at_raw = entry.get("created_at", "")
-                    if created_at_raw:
-                        try:
-                            dt = datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
-                            if dt.tzinfo is None:
-                                dt = dt.replace(tzinfo=target_tz)
-                            else:
-                                dt = dt.astimezone(target_tz)
-
-                            formatted = dt.strftime("%Y-%m-%d %H:%M:%S %z")
-                            if len(formatted) > 5 and formatted[-5] in ('+', '-'):
-                                formatted = formatted[:-2] + ":" + formatted[-2:]
-                            created_at_local = formatted
-                        except Exception:
-                            created_at_local = created_at_raw
-                    else:
-                        created_at_local = ""
+                    created_at_local = format_datetime(created_at_raw) if created_at_raw else ""
 
                     priority_changes.append(
                         PriorityChange(
@@ -394,7 +408,7 @@ class PriorityAnalyzer:
 
 
 def process_incidents_concurrently(
-    api: PagerDutyAPI, incidents: List[Dict[str, Any]], time_zone: str = "UTC", max_workers: int = 5
+    api: PagerDutyAPI, incidents: List[Dict[str, Any]], time_zone: Optional[str] = None, max_workers: int = 5
 ) -> List[PriorityChange]:
     """Processes incidents concurrently to fetch log entries efficiently."""
     changes = []
@@ -513,9 +527,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-t",
         "--timezone",
-        default="UTC",
+        default=None,
         metavar="TZ",
-        help="Custom timezone IANA name for relative calendar calculations (e.g., 'America/Santiago', 'UTC')",
+        help="Custom timezone IANA name (e.g., 'America/Santiago', 'UTC'). If omitted, dates are "
+        "interpreted using the account's default time zone and output timestamps are rendered "
+        "in UTC without an offset",
     )
     parser.add_argument(
         "-o",
@@ -530,6 +546,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=8,
         help="API limit rate in req/s (default: 8)",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show detailed [INFO] level log messages",
+    )
     return parser
 
 
@@ -542,6 +563,8 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    logger.setLevel(logging.INFO if args.debug else logging.WARNING)
+
     api_token = os.environ.get("PAGERDUTY_API_TOKEN") or os.environ.get(
         "API_TOKEN"
     )
@@ -551,8 +574,8 @@ def main() -> None:
         )
         sys.exit(1)
 
-    target_tz = parse_timezone(args.timezone)
-    now_local = datetime.now(target_tz)
+    target_tz = parse_timezone(args.timezone) if args.timezone else None
+    now_local = datetime.now(target_tz or timezone.utc)
 
     since, until = None, None
 
@@ -607,6 +630,7 @@ def main() -> None:
 
         elapsed = time.time() - start_time
         print(f"\n{'='*50}")
+        print(f"Time Window ({args.timezone or 'account default'}): {since or 'Beginning'} -> {until or 'Now'}")
         print(f"✓ Processed {len(priority_changes)} priority change records in {elapsed:.2f}s")
         print(f"✓ Report saved to '{output_filename or 'N/A'}'")
         print(f"{'='*50}\n")

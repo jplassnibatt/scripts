@@ -13,7 +13,11 @@ import requests
 
 __version__ = "1.6.0"
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
 logger = logging.getLogger(__name__)
 
 
@@ -178,8 +182,9 @@ class PagerDutyAnalyzer:
             return True
         return False
 
-    def get_incidents_for_timerange(self, since: str, until: str, time_zone: str = "UTC") -> List[Dict]:
-        """Fetches incidents natively evaluated by PagerDuty's time_zone handler."""
+    def get_incidents_for_timerange(self, since: str, until: str, time_zone: Optional[str] = None) -> List[Dict]:
+        """Fetches incidents natively evaluated by PagerDuty's time_zone handler when provided;
+        otherwise the account's default time zone governs interpretation."""
         incidents = []
         offset = 0
         limit = 100
@@ -192,8 +197,9 @@ class PagerDutyAnalyzer:
                 "offset": offset,
                 "sort_by": "created_at:desc",
                 "total": True,
-                "time_zone": time_zone,
             }
+            if time_zone:
+                params["time_zone"] = time_zone
 
             response = self._request(f"{self.base_url}/incidents", params=params)
             if not response:
@@ -210,7 +216,7 @@ class PagerDutyAnalyzer:
 
         return incidents
 
-    def get_all_incidents(self, since_date: str, until_date: str, time_zone: str = "UTC") -> List[Dict]:
+    def get_all_incidents(self, since_date: str, until_date: str, time_zone: Optional[str] = None) -> List[Dict]:
         """Handles PagerDuty's 6-month max date range constraint using naive local boundaries."""
         all_incidents = []
 
@@ -237,7 +243,7 @@ class PagerDutyAnalyzer:
             chunk_since = current_start.strftime("%Y-%m-%dT%H:%M:%S")
             chunk_until = current_end.strftime("%Y-%m-%dT%H:%M:%S")
 
-            logger.info(f"Fetching chunk: {chunk_since} -> {chunk_until} (TZ: {time_zone})")
+            logger.info(f"Fetching chunk: {chunk_since} -> {chunk_until} (TZ: {time_zone or 'account default'})")
 
             chunk_incidents = self.get_incidents_for_timerange(
                 chunk_since, chunk_until, time_zone
@@ -249,9 +255,7 @@ class PagerDutyAnalyzer:
         logger.info(f"✓ Retrieved total of {len(all_incidents)} incidents")
         return all_incidents
 
-    def analyze_incidents(
-        self, incidents: List[Dict], target_tz: Optional[tzinfo] = None
-    ) -> Dict[str, Dict]:
+    def analyze_incidents(self, incidents: List[Dict]) -> Dict[str, Dict]:
         """Filters and analyzes incidents, extracting natively localized timestamps."""
         alert_counts = {}
         logger.info("Analyzing incidents for multiple alerts...")
@@ -262,25 +266,11 @@ class PagerDutyAnalyzer:
 
             if num_alerts >= 2:
                 service_data = incident.get("service") or {}
-                
-                created_at_raw = incident.get("created_at", "N/A")
-                if created_at_raw != "N/A":
-                    try:
-                        dt = datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
-                        if target_tz:
-                            if dt.tzinfo is None:
-                                dt = dt.replace(tzinfo=target_tz)
-                            else:
-                                dt = dt.astimezone(target_tz)
 
-                        formatted = dt.strftime("%Y-%m-%d %H:%M:%S %z")
-                        if len(formatted) > 5 and formatted[-5] in ('+', '-'):
-                            formatted = formatted[:-2] + ":" + formatted[-2:]
-                        created_at_local = formatted.strip()
-                    except Exception:
-                        created_at_local = created_at_raw
-                else:
-                    created_at_local = "N/A"
+                created_at_raw = incident.get("created_at", "N/A")
+                created_at_local = (
+                    format_datetime(created_at_raw) if created_at_raw != "N/A" else "N/A"
+                )
 
                 alert_counts[incident["id"]] = {
                     "alert_count": num_alerts,
@@ -297,21 +287,41 @@ class PagerDutyAnalyzer:
         return alert_counts
 
 
-def format_period_datetime(dt_str: str, tz: tzinfo) -> str:
-    """Formats period date string with a colonized UTC offset."""
+def format_datetime(dt_str: Optional[str]) -> str:
+    """Reformats an ISO 8601 timestamp for display: 'T' becomes a space, and a missing
+    offset (naive or 'Z') is made explicit as '+00:00' (UTC). The offset, if any, is
+    taken as-is with no conversion applied."""
+    if not dt_str:
+        return dt_str or ""
+    match = re.match(
+        r"^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}:\d{2}))?(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?$",
+        dt_str.strip(),
+    )
+    if not match:
+        return dt_str
+
+    date_part, time_part, offset = match.groups()
+    time_part = time_part or "00:00:00"
+    if not offset or offset == "Z":
+        offset = "+00:00"
+    elif ":" not in offset:
+        offset = f"{offset[:3]}:{offset[3:]}"
+
+    return f"{date_part} {time_part} {offset}"
+
+
+def format_period_datetime(dt_str: str, time_zone: Optional[str] = None) -> str:
+    """Formats a period boundary string. Unlike API response timestamps, these are
+    constructed locally and carry no offset of their own, so the tz actually applied
+    to the query (or UTC, if none was given) is attached here for display."""
     if not dt_str:
         return dt_str
     try:
         cleaned = dt_str.replace("Z", "+00:00")
-        if "T" in cleaned:
-            dt = datetime.fromisoformat(cleaned)
-        else:
-            dt = datetime.strptime(cleaned, "%Y-%m-%d")
+        dt = datetime.fromisoformat(cleaned) if "T" in cleaned else datetime.strptime(cleaned, "%Y-%m-%d")
 
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=tz)
-        else:
-            dt = dt.astimezone(tz)
+            dt = dt.replace(tzinfo=parse_timezone(time_zone) if time_zone else timezone.utc)
 
         formatted = dt.strftime("%Y-%m-%d %H:%M:%S %z")
         if len(formatted) > 5 and formatted[-5] in ("+", "-"):
@@ -322,11 +332,11 @@ def format_period_datetime(dt_str: str, tz: tzinfo) -> str:
 
 
 def export_to_csv(
-    alert_counts: Dict[str, Dict], 
-    since: str, 
-    until: str, 
+    alert_counts: Dict[str, Dict],
+    since: str,
+    until: str,
     total: int,
-    time_zone: str,
+    time_zone: Optional[str] = None,
     prefix: Optional[str] = None,
     default_prefix: str = "pagerduty_incident_grouped_alerts",
 ) -> str:
@@ -341,9 +351,8 @@ def export_to_csv(
 
     total_alerts = sum(inc["alert_count"] for inc in alert_counts.values())
 
-    target_tz = parse_timezone(time_zone)
-    display_since = format_period_datetime(since, target_tz)
-    display_until = format_period_datetime(until, target_tz)
+    display_since = format_period_datetime(since, time_zone)
+    display_until = format_period_datetime(until, time_zone)
 
     with open(filename, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.writer(csvfile)
@@ -423,9 +432,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-t",
         "--timezone",
-        default="UTC",
+        default=None,
         metavar="TZ",
-        help="Custom timezone IANA name for relative calendar calculations (e.g., 'America/Santiago', 'UTC')",
+        help="Custom timezone IANA name (e.g., 'America/Santiago', 'UTC'). If omitted, dates are "
+        "interpreted using the account's default time zone and output timestamps are rendered "
+        "in UTC without an offset",
     )
     parser.add_argument(
         "-o",
@@ -440,6 +451,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=8,
         help="Maximum API requests per second",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show detailed [INFO] level log messages",
+    )
     return parser
 
 
@@ -452,6 +468,8 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    logger.setLevel(logging.INFO if args.debug else logging.WARNING)
+
     api_token = os.environ.get("PAGERDUTY_API_TOKEN") or os.environ.get("API_TOKEN")
     if not api_token or api_token.strip() == "YOUR_API_TOKEN_HERE":
         logger.error(
@@ -459,8 +477,8 @@ def main() -> None:
         )
         sys.exit(1)
 
-    target_tz = parse_timezone(args.timezone)
-    now_local = datetime.now(target_tz)
+    target_tz = parse_timezone(args.timezone) if args.timezone else None
+    now_local = datetime.now(target_tz or timezone.utc)
 
     since, until = None, None
 
@@ -510,18 +528,19 @@ def main() -> None:
             logger.warning("No incidents found in the specified time range.")
             sys.exit(0)
 
-        alert_counts = analyzer.analyze_incidents(incidents, target_tz=target_tz)
+        alert_counts = analyzer.analyze_incidents(incidents)
         output_filename = export_to_csv(
-            alert_counts, 
-            since=since, 
-            until=until, 
-            total=len(incidents), 
+            alert_counts,
+            since=since,
+            until=until,
+            total=len(incidents),
             time_zone=args.timezone,
             prefix=args.output
         )
 
         elapsed = time.time() - start_time
         print(f"\n{'='*60}")
+        print(f"Time Window ({args.timezone or 'account default'}): {since or 'Beginning'} -> {until or 'Now'}")
         print(f"✓ Processed {len(incidents)} total incidents in {elapsed:.2f}s")
         print(f"✓ Report saved to '{output_filename}'")
         print(f"{'='*60}\n")

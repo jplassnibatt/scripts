@@ -12,7 +12,11 @@ import requests
 
 __version__ = "1.5.0"
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
 logger = logging.getLogger(__name__)
 
 
@@ -166,22 +170,24 @@ class PagerDutyAPI:
         return False
 
     def get_incidents(
-        self, since: Optional[str] = None, until: Optional[str] = None, time_zone: str = "UTC"
+        self, since: Optional[str] = None, until: Optional[str] = None, time_zone: Optional[str] = None
     ) -> List[Dict]:
-        """Fetches all incidents within specified date range natively evaluated by PagerDuty's time_zone handler."""
+        """Fetches all incidents within the specified date range, natively evaluated by PagerDuty's
+        time_zone handler when provided; otherwise the account's default time zone governs interpretation."""
         incidents = []
         offset = 0
         limit = 100
 
-        logger.info(f"Fetching incidents from native API window: {since or 'Beginning'} -> {until or 'Now'} (TZ: {time_zone})")
+        logger.info(f"Fetching incidents from native API window: {since or 'Beginning'} -> {until or 'Now'} (TZ: {time_zone or 'account default'})")
 
         while True:
             params = {
                 "offset": offset,
                 "limit": limit,
                 "include[]": ["first_trigger_log_entry"],
-                "time_zone": time_zone,
             }
+            if time_zone:
+                params["time_zone"] = time_zone
             if since:
                 params["since"] = since
             if until:
@@ -206,9 +212,29 @@ class PagerDutyAPI:
         return incidents
 
 
-def extract_incident_data(
-    incidents: List[Dict], target_tz: Optional[tzinfo] = None
-) -> List[Dict]:
+def format_datetime(dt_str: Optional[str]) -> str:
+    """Reformats an ISO 8601 timestamp for display: 'T' becomes a space, and a missing
+    offset (naive or 'Z') is made explicit as '+00:00' (UTC). The offset, if any, is
+    taken as-is from the API response with no conversion applied."""
+    if not dt_str:
+        return ""
+    match = re.match(
+        r"^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?$",
+        dt_str.strip(),
+    )
+    if not match:
+        return dt_str
+
+    date_part, time_part, offset = match.groups()
+    if not offset or offset == "Z":
+        offset = "+00:00"
+    elif ":" not in offset:
+        offset = f"{offset[:3]}:{offset[3:]}"
+
+    return f"{date_part} {time_part} {offset}"
+
+
+def extract_incident_data(incidents: List[Dict]) -> List[Dict]:
     """Extracts and flattens incident records directly from natively localized API responses."""
     results = []
 
@@ -218,23 +244,9 @@ def extract_incident_data(
             trigger_summary = incident["first_trigger_log_entry"].get("summary", "N/A")
 
         created_at_raw = incident.get("created_at", "N/A")
-        if created_at_raw != "N/A":
-            try:
-                dt = datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
-                if target_tz:
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=target_tz)
-                    else:
-                        dt = dt.astimezone(target_tz)
-
-                formatted = dt.strftime("%Y-%m-%d %H:%M:%S %z")
-                if len(formatted) > 5 and formatted[-5] in ("+", "-"):
-                    formatted = formatted[:-2] + ":" + formatted[-2:]
-                created_at_local = formatted.strip()
-            except Exception:
-                created_at_local = created_at_raw
-        else:
-            created_at_local = "N/A"
+        created_at_local = (
+            format_datetime(created_at_raw) if created_at_raw != "N/A" else "N/A"
+        )
 
         results.append(
             {
@@ -334,15 +346,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-t",
         "--timezone",
-        default="UTC",
+        default=None,
         metavar="TZ",
-        help="Custom timezone IANA name for relative calendar calculations (e.g., 'America/Santiago', 'UTC')",
+        help="Custom timezone IANA name (e.g., 'America/Santiago', 'UTC'). If omitted, dates are "
+        "interpreted using the account's default time zone and output timestamps are rendered "
+        "in UTC without an offset",
     )
     parser.add_argument(
         "-o", "--output", default="pagerduty_incidents", help="Custom CSV filename prefix"
     )
     parser.add_argument(
         "-r", "--rate-limit", type=int, default=8, help="Max API requests per second"
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show detailed [INFO] level log messages",
     )
     return parser
 
@@ -356,6 +375,8 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    logger.setLevel(logging.INFO if args.debug else logging.WARNING)
+
     api_token = os.environ.get("PAGERDUTY_API_TOKEN") or os.environ.get("API_TOKEN")
     if not api_token or api_token.strip() == "YOUR_API_TOKEN_HERE":
         logger.error(
@@ -363,8 +384,8 @@ def main() -> None:
         )
         sys.exit(1)
 
-    target_tz = parse_timezone(args.timezone)
-    now_local = datetime.now(target_tz)
+    target_tz = parse_timezone(args.timezone) if args.timezone else None
+    now_local = datetime.now(target_tz or timezone.utc)
 
     since, until = None, None
 
@@ -415,11 +436,12 @@ def main() -> None:
             logger.warning("No incidents matched the target date range.")
             sys.exit(0)
 
-        results = extract_incident_data(incidents, target_tz=target_tz)
+        results = extract_incident_data(incidents)
         output_filename = export_to_csv(results, prefix=args.output)
 
         elapsed = time.time() - start_time
         print(f"\n{'='*60}")
+        print(f"Time Window ({args.timezone or 'account default'}): {since or 'Beginning'} -> {until or 'Now'}")
         print(f"✓ Processed {len(incidents)} incidents in {elapsed:.2f}s")
         print(f"✓ Report output: {output_filename}")
         print(f"{'='*60}\n")

@@ -1553,6 +1553,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-r", "--replace_refs", dest="replace_refs", action="store_true", help="Replace hardcoded IDs with Terraform references")
     parser.add_argument("-s", "--structure", dest="structure", action="store_true", help="Structure imported files into logical groups")
     parser.add_argument("-c", "--cleanup", dest="cleanup", action="store_true", help="Remove temporary backup and import files")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show detailed [DEBUG] level log messages (cache hits, raw API calls, etc.)",
+    )
     return parser
 
 
@@ -1563,6 +1568,8 @@ def main() -> None:
         sys.exit(0)
 
     args = parser.parse_args()
+
+    logger.setLevel(logging.DEBUG if args.debug else logging.INFO)
 
     if args.import_mode:
         run_import()

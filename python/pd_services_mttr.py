@@ -13,7 +13,11 @@ import requests
 
 __version__ = "1.7.0"
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
 logger = logging.getLogger(__name__)
 
 
@@ -180,7 +184,7 @@ class PagerDutyAPI:
         return resolved_ids
 
     def fetch_resolved_incidents(
-        self, since: str, until: str, service_ids: Optional[List[str]] = None, time_zone: str = "UTC"
+        self, since: str, until: str, service_ids: Optional[List[str]] = None, time_zone: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """Fetches resolved incidents using 6-month chunking natively evaluated by time_zone."""
         all_incidents = []
@@ -211,7 +215,7 @@ class PagerDutyAPI:
             chunk_until = chunk_end.strftime("%Y-%m-%dT%H:%M:%S")
             
             logger.info(
-                f"Fetching chunk: {chunk_since} -> {chunk_until} (TZ: {time_zone})"
+                f"Fetching chunk: {chunk_since} -> {chunk_until} (TZ: {time_zone or 'account default'})"
             )
 
             offset = 0
@@ -220,8 +224,9 @@ class PagerDutyAPI:
                 "since": chunk_since,
                 "until": chunk_until,
                 "statuses[]": ["resolved"],
-                "time_zone": time_zone,
             }
+            if time_zone:
+                params["time_zone"] = time_zone
             if service_ids:
                 params["service_ids[]"] = service_ids
 
@@ -329,21 +334,18 @@ class MTTRAnalyzer:
         return results
 
 
-def format_period_datetime(dt_str: str, tz: tzinfo) -> str:
-    """Formats period date string with a colonized UTC offset."""
+def format_period_datetime(dt_str: str, time_zone: Optional[str] = None) -> str:
+    """Formats a period boundary string. Unlike API response timestamps, these are
+    constructed locally and carry no offset of their own, so the tz actually applied
+    to the query (or UTC, if none was given) is attached here for display."""
     if not dt_str:
         return dt_str
     try:
         cleaned = dt_str.replace("Z", "+00:00")
-        if "T" in cleaned:
-            dt = datetime.fromisoformat(cleaned)
-        else:
-            dt = datetime.strptime(cleaned, "%Y-%m-%d")
+        dt = datetime.fromisoformat(cleaned) if "T" in cleaned else datetime.strptime(cleaned, "%Y-%m-%d")
 
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=tz)
-        else:
-            dt = dt.astimezone(tz)
+            dt = dt.replace(tzinfo=parse_timezone(time_zone) if time_zone else timezone.utc)
 
         formatted = dt.strftime("%Y-%m-%d %H:%M:%S %z")
         if len(formatted) > 5 and formatted[-5] in ("+", "-"):
@@ -354,11 +356,11 @@ def format_period_datetime(dt_str: str, tz: tzinfo) -> str:
 
 
 def export_to_csv(
-    mttr_stats: Dict[str, Dict], 
-    since: str, 
-    until: str, 
-    time_zone: str,
-    prefix: Optional[str] = None, 
+    mttr_stats: Dict[str, Dict],
+    since: str,
+    until: str,
+    time_zone: Optional[str] = None,
+    prefix: Optional[str] = None,
     default_prefix: str = "pagerduty_mttr_analysis"
 ) -> str:
     """Exports structured MTTR statistics to a safely versioned timestamped CSV."""
@@ -400,9 +402,8 @@ def export_to_csv(
             }
         )
 
-    target_tz = parse_timezone(time_zone)
-    display_since = format_period_datetime(since, target_tz)
-    display_until = format_period_datetime(until, target_tz)
+    display_since = format_period_datetime(since, time_zone)
+    display_until = format_period_datetime(until, time_zone)
 
     with open(filename, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.writer(csvfile)
@@ -454,9 +455,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-t",
         "--timezone",
-        default="UTC",
+        default=None,
         metavar="TZ",
-        help="Custom timezone IANA name for relative calendar calculations (e.g., 'America/Santiago', 'UTC')",
+        help="Custom timezone IANA name (e.g., 'America/Santiago', 'UTC'). If omitted, dates are "
+        "interpreted using the account's default time zone and output timestamps are rendered "
+        "in UTC without an offset",
     )
     parser.add_argument(
         "-S",
@@ -466,6 +469,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Space-separated list of Service Names (in quotes if they contain spaces) OR Service IDs to filter by",
     )
     parser.add_argument("-o", "--output", help="Custom CSV filename prefix")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show detailed [INFO] level log messages",
+    )
     return parser
 
 
@@ -478,6 +486,8 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    logger.setLevel(logging.INFO if args.debug else logging.WARNING)
+
     api_token = os.environ.get("PAGERDUTY_API_TOKEN") or os.environ.get("API_TOKEN")
     if not api_token or api_token.strip() == "YOUR_API_TOKEN_HERE":
         logger.error(
@@ -485,8 +495,8 @@ def main() -> None:
         )
         sys.exit(1)
 
-    target_tz = parse_timezone(args.timezone)
-    now_local = datetime.now(target_tz)
+    target_tz = parse_timezone(args.timezone) if args.timezone else None
+    now_local = datetime.now(target_tz or timezone.utc)
 
     since, until = None, None
 
@@ -547,10 +557,11 @@ def main() -> None:
         else:
             logger.info("Calculating MTTR statistics...")
             mttr_stats = MTTRAnalyzer.analyze_by_service(incidents)
-            output_filename = export_to_csv(mttr_stats, since, until, args.timezone, prefix=args.output)
+            output_filename = export_to_csv(mttr_stats, since, until, time_zone=args.timezone, prefix=args.output)
 
         elapsed = time.time() - start_time
         print(f"\n{'='*50}")
+        print(f"Time Window ({args.timezone or 'account default'}): {since or 'Beginning'} -> {until or 'Now'}")
         print(f"✓ Analyzed MTTR across {len(incidents)} records in {elapsed:.2f}s")
         if incidents:
             print(f"✓ Report saved to '{output_filename}'")

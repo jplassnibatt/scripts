@@ -12,7 +12,11 @@ import requests
 
 __version__ = "1.5.0"
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
 logger = logging.getLogger(__name__)
 
 
@@ -167,23 +171,25 @@ class PagerDutyAnalyticsExporter:
         return False
 
     def get_analytics_incidents(
-        self, since: Optional[str] = None, until: Optional[str] = None, time_zone: str = "UTC"
+        self, since: Optional[str] = None, until: Optional[str] = None, time_zone: Optional[str] = None
     ) -> List[Dict]:
-        """Fetch pre-calculated incident metrics via POST /analytics/raw/incidents using native timezone delegation."""
+        """Fetch pre-calculated incident metrics via POST /analytics/raw/incidents, using native timezone
+        delegation when a time_zone is provided; otherwise the account's default time zone governs."""
         incidents = []
         limit = 1000
 
-        logger.info(f"Fetching enriched analytics data from window: {since or 'Beginning'} -> {until or 'Now'} (TZ: {time_zone})")
+        logger.info(f"Fetching enriched analytics data from window: {since or 'Beginning'} -> {until or 'Now'} (TZ: {time_zone or 'account default'})")
 
-        custom_headers = {"time-zone": time_zone}
+        custom_headers = {"time-zone": time_zone} if time_zone else {}
 
         body = {
             "limit": limit,
             "order": "asc",
             "order_by": "created_at",
-            "time_zone": time_zone,
             "filters": {}
         }
+        if time_zone:
+            body["time_zone"] = time_zone
 
         if since:
             body["filters"]["created_at_start"] = since
@@ -221,7 +227,30 @@ def format_timedelta(total_seconds: Optional[int]) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
-def process_analytics_data(raw_incidents: List[Dict], target_tz: tzinfo) -> List[Dict]:
+def format_analytics_datetime(dt_str: Optional[str], time_zone: Optional[str] = None) -> str:
+    """Formats a timestamp from the Analytics API. Unlike the regular v2 API (whose
+    created_at is always true UTC), this endpoint pre-localizes timestamps to whatever
+    time_zone was requested (or the account default) and then strips the offset — so a
+    naive value here does NOT mean UTC; it means the tz actually applied to the query.
+    We attach that tz for display when the offset is missing."""
+    if not dt_str or dt_str == "N/A":
+        return dt_str or ""
+    try:
+        cleaned = dt_str.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(cleaned)
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=parse_timezone(time_zone) if time_zone else timezone.utc)
+
+        formatted = dt.strftime("%Y-%m-%d %H:%M:%S %z")
+        if len(formatted) > 5 and formatted[-5] in ("+", "-"):
+            formatted = formatted[:-2] + ":" + formatted[-2:]
+        return formatted.strip()
+    except Exception:
+        return dt_str
+
+
+def process_analytics_data(raw_incidents: List[Dict], time_zone: Optional[str] = None) -> List[Dict]:
     """Map raw analytics data to CSV columns cleanly and format localized timestamps."""
     processed = []
 
@@ -231,27 +260,11 @@ def process_analytics_data(raw_incidents: List[Dict], target_tz: tzinfo) -> List
         all_acks = ", ".join(ack_users) if ack_users else "No acknowledgment"
 
         created_at_raw = inc.get("created_at", "N/A")
-        if created_at_raw != "N/A":
-            try:
-                dt = datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
-                
-                # The Analytics API natively localizes timestamps but strips the offset making them "naive"
-                # We attach the target_tz explicitly so %z can properly format the timezone offset
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=target_tz)
-                else:
-                    dt = dt.astimezone(target_tz)
-
-                formatted = dt.strftime("%Y-%m-%d %H:%M:%S %z")
-                
-                # Inject the colon into the %z output (e.g., -0400 -> -04:00)
-                if len(formatted) > 5 and formatted[-5] in ('+', '-'):
-                    formatted = formatted[:-2] + ":" + formatted[-2:]
-                created_at_local = formatted.strip()
-            except Exception:
-                created_at_local = created_at_raw
-        else:
-            created_at_local = "N/A"
+        created_at_local = (
+            format_analytics_datetime(created_at_raw, time_zone)
+            if created_at_raw != "N/A"
+            else "N/A"
+        )
 
         processed.append({
             "Incident ID": inc.get("id", "N/A"),
@@ -317,7 +330,7 @@ class WideHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
 def build_parser() -> argparse.ArgumentParser:
     """Builds CLI options with explicit default, relative lookback, and custom timezone options."""
     parser = argparse.ArgumentParser(
-        description=f"CSE - PagerDuty Incident MTTA/MTTR Analytics Historic (FAST with 24 hours delay) v{__version__}",
+        description=f"CSE - PagerDuty Incident MTTA/MTTR Analytics Historic (FAST with 24 hours delayed information) v{__version__}",
         formatter_class=WideHelpFormatter,
     )
     parser.add_argument(
@@ -343,9 +356,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-t",
         "--timezone",
-        default="UTC",
+        required=True,
         metavar="TZ",
-        help="Custom timezone IANA name for relative calendar calculations (e.g., 'America/Santiago', 'UTC')",
+        help="Custom timezone IANA name (e.g., 'America/Santiago', 'UTC'). Required: the Analytics "
+        "API used by this tool defaults to UTC (not your account's configured time zone) when "
+        "time_zone is omitted, so it must always be specified explicitly",
     )
     parser.add_argument(
         "-o", "--output", help="Output CSV filename prefix"
@@ -356,6 +371,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=4,
         help="API limit rate in req/s (default: 4)",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show detailed [INFO] level log messages",
     )
     return parser
 
@@ -368,6 +388,8 @@ def main() -> None:
         sys.exit(0)
 
     args = parser.parse_args()
+
+    logger.setLevel(logging.INFO if args.debug else logging.WARNING)
 
     api_token = os.environ.get("PAGERDUTY_API_TOKEN") or os.environ.get("API_TOKEN")
     if not api_token or api_token.strip() == "YOUR_API_TOKEN_HERE":
@@ -434,7 +456,7 @@ def main() -> None:
             logger.warning("No incidents found for the specified date range.")
             sys.exit(0)
 
-        processed_incidents = process_analytics_data(raw_incidents, target_tz=target_tz)
+        processed_incidents = process_analytics_data(raw_incidents, time_zone=args.timezone)
 
         output_filename = export_to_csv(processed_incidents, prefix=args.output)
         elapsed = time.time() - start_time

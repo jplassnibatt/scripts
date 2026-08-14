@@ -12,7 +12,11 @@ import requests
 
 __version__ = "1.6.0"
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
 logger = logging.getLogger(__name__)
 
 
@@ -151,10 +155,14 @@ class PagerDutyAPI:
         return False
 
     def get_alerts(
-        self, since: Optional[str] = None, until: Optional[str] = None, time_zone: str = "UTC"
+        self,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+        time_zone: Optional[str] = None,
     ) -> List[Dict]:
-        """Fetches alerts using offset pagination, natively evaluated by PagerDuty's time_zone parameter."""
-        logger.info(f"Fetching alerts from native API window: {since or 'Beginning'} -> {until or 'Now'} (TZ: {time_zone})")
+        """Fetches alerts using offset pagination, natively evaluated by PagerDuty's time_zone parameter
+        when provided; otherwise the account's default time zone governs interpretation."""
+        logger.info(f"Fetching alerts from native API window: {since or 'Beginning'} -> {until or 'Now'} (TZ: {time_zone or 'account default'})")
         alerts = []
         offset = 0
         limit = 100
@@ -163,8 +171,9 @@ class PagerDutyAPI:
             params = {
                 "offset": offset,
                 "limit": limit,
-                "time_zone": time_zone,
             }
+            if time_zone:
+                params["time_zone"] = time_zone
             if since:
                 params["since"] = since
             if until:
@@ -224,19 +233,25 @@ class PagerDutyAPI:
 
 
 def format_datetime(dt_str: Optional[str]) -> str:
-    """Formats ISO datetime string from natively localized API responses with a colonized offset."""
+    """Reformats an ISO 8601 timestamp for display: 'T' becomes a space, and a missing
+    offset (naive or 'Z') is made explicit as '+00:00' (UTC). The offset, if any, is
+    taken as-is from the API response with no conversion applied."""
     if not dt_str:
         return ""
-    try:
-        dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
-        
-        formatted = dt.strftime("%Y-%m-%d %H:%M:%S %z")
-        if len(formatted) > 5 and formatted[-5] in ('+', '-'):
-            formatted = formatted[:-2] + ":" + formatted[-2:]
-            
-        return formatted
-    except Exception:
+    match = re.match(
+        r"^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?$",
+        dt_str.strip(),
+    )
+    if not match:
         return dt_str
+
+    date_part, time_part, offset = match.groups()
+    if not offset or offset == "Z":
+        offset = "+00:00"
+    elif ":" not in offset:
+        offset = f"{offset[:3]}:{offset[3:]}"
+
+    return f"{date_part} {time_part} {offset}"
 
 
 def export_to_csv(
@@ -344,9 +359,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-t",
         "--timezone",
-        default="UTC",
+        default=None,
         metavar="TZ",
-        help="Custom timezone IANA name for relative calendar calculations (e.g., 'America/Santiago', 'UTC')",
+        help="Custom timezone IANA name (e.g., 'America/Santiago', 'UTC'). If omitted, dates are "
+        "interpreted using the account's default time zone and output timestamps are rendered "
+        "in UTC without an offset",
     )
     parser.add_argument(
         "-o",
@@ -361,6 +378,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=8,
         help="API limit rate in req/s",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show detailed [INFO] level log messages",
+    )
     return parser
 
 
@@ -373,6 +395,8 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    logger.setLevel(logging.INFO if args.debug else logging.WARNING)
+
     api_token = os.environ.get("PAGERDUTY_API_TOKEN") or os.environ.get(
         "API_TOKEN"
     )
@@ -382,8 +406,8 @@ def main() -> None:
         )
         sys.exit(1)
 
-    target_tz = parse_timezone(args.timezone)
-    now_local = datetime.now(target_tz)
+    target_tz = parse_timezone(args.timezone) if args.timezone else None
+    now_local = datetime.now(target_tz or timezone.utc)
 
     since, until = None, None
 
@@ -434,6 +458,7 @@ def main() -> None:
 
         elapsed = time.time() - start_time
         print(f"\n{'='*50}")
+        print(f"Time Window ({args.timezone or 'account default'}): {since or 'Beginning'} -> {until or 'Now'}")
         print(f"✓ Processed {len(alerts)} records in {elapsed:.2f}s")
         print(f"✓ Report saved to '{output_filename}'")
         print(f"{'='*50}\n")

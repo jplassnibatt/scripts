@@ -11,7 +11,11 @@ import requests
 
 __version__ = "1.3.0"
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
 logger = logging.getLogger(__name__)
 
 
@@ -282,6 +286,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip confirmation prompt and execute actual deletion immediately",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show detailed [INFO] level log messages",
+    )
     return parser
 
 
@@ -293,6 +302,8 @@ def main() -> None:
         sys.exit(0)
 
     args = parser.parse_args()
+
+    logger.setLevel(logging.INFO if args.debug else logging.WARNING)
 
     api_token = os.environ.get("PAGERDUTY_API_TOKEN") or os.environ.get("API_TOKEN")
     if not api_token:

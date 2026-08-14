@@ -16,7 +16,11 @@ import requests
 
 __version__ = "1.3.0"
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
 logger = logging.getLogger(__name__)
 
 
@@ -429,12 +433,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=8,
         help="Maximum API requests per second",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show detailed [INFO] level log messages",
+    )
     return parser
 
 
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+
+    logger.setLevel(logging.INFO if args.debug else logging.WARNING)
 
     api_token = os.environ.get("PAGERDUTY_API_TOKEN") or os.environ.get(
         "API_TOKEN"
@@ -449,6 +460,8 @@ def main() -> None:
         sys.exit(1)
 
     try:
+        start_time = time.time()
+
         api = PagerDutyAPI(api_token, max_rate_per_second=args.rate_limit)
         if not api.validate_token():
             sys.exit(1)
@@ -475,7 +488,15 @@ def main() -> None:
         )
 
         # Utilize safely isolated output writing
-        export_to_csv(matches, prefix=args.output)
+        output_filename = export_to_csv(matches, prefix=args.output)
+
+        elapsed = time.time() - start_time
+        print(f"\n{'='*50}")
+        print(f"✓ Escalation Policies analyzed: {len(ep_map)}")
+        print(f"✓ Dependency matches found:     {len(matches)}")
+        print(f"✓ Execution time:               {elapsed:.2f}s")
+        print(f"✓ Output file:                  {output_filename or 'N/A'}")
+        print(f"{'='*50}\n")
 
     except KeyboardInterrupt:
         logger.warning("\nProcess interrupted by user. Exiting safely.")
