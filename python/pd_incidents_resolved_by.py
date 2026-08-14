@@ -350,7 +350,7 @@ def format_datetime(dt_str: str) -> str:
 def export_to_csv(
     incidents: List[Dict],
     prefix: Optional[str] = None,
-    default_prefix: str = "pagerduty_resolved_incidents"
+    default_prefix: str = "pagerduty_incidents_resolved_by"
 ) -> Optional[str]:
     """Export resolved incident records to a safely versioned timestamped CSV file."""
     if not incidents:
@@ -453,7 +453,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Service ID to filter (repeatable)",
     )
     parser.add_argument(
-        "-o", "--output", default="pagerduty_resolved_incidents", help="Custom CSV filename prefix"
+        "-o", "--output", default="pagerduty_incidents_resolved_by", help="Custom CSV filename prefix"
     )
     parser.add_argument(
         "-r",

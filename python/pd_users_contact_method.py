@@ -280,7 +280,7 @@ def process_user_contact_methods(
 def export_to_csv(
     data: List[Tuple[Dict, List[Dict]]], 
     prefix: Optional[str] = None, 
-    default_prefix: str = "pagerduty_users_contact_methods"
+    default_prefix: str = "pagerduty_users_contact_method"
 ) -> Optional[str]:
     """Export aggregated contact methods to a dynamic, safely versioned timestamped CSV file."""
     if not data:
@@ -354,7 +354,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-v", "--version", action="version", version=f"%(prog)s v{__version__}"
     )
     parser.add_argument(
-        "-o", "--output", default="pagerduty_users_contact_methods", help="Output CSV filename prefix"
+        "-o", "--output", default="pagerduty_users_contact_method", help="Output CSV filename prefix"
     )
     parser.add_argument(
         "-w", "--max-workers", type=int, default=5, help="Maximum concurrent workers (1-20)"

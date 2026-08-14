@@ -303,7 +303,7 @@ def process_users_licenses(
 def export_to_csv(
     users_data: List[Dict], 
     prefix: Optional[str] = None, 
-    default_prefix: str = "pagerduty_users_licenses"
+    default_prefix: str = "pagerduty_licenses_allocation"
 ) -> Optional[str]:
     """Export user license records to a safely versioned timestamped CSV file."""
     if not users_data:
@@ -365,7 +365,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-v", "--version", action="version", version=f"%(prog)s v{__version__}"
     )
     parser.add_argument(
-        "-o", "--output", default="pagerduty_users_licenses", help="Output CSV filename prefix"
+        "-o", "--output", default="pagerduty_licenses_allocation", help="Output CSV filename prefix"
     )
     parser.add_argument(
         "-w", "--max-workers", type=int, default=5, help="Maximum concurrent workers (1-20)"

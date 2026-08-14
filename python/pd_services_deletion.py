@@ -217,7 +217,7 @@ def prompt_interactive_selection(all_services: List[Dict[str, str]]) -> List[Dic
 def export_report_csv(
     results: List[Dict[str, Any]], 
     prefix: Optional[str] = None, 
-    default_prefix: str = "pagerduty_service_deletion"
+    default_prefix: str = "pagerduty_services_deletion"
 ) -> Optional[str]:
     """Exports deletion execution results to a safely versioned timestamped CSV file."""
     if not results:
@@ -278,7 +278,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
-        "-o", "--output", default="pagerduty_service_deletion", help="Custom CSV output filename prefix for the deletion report"
+        "-o", "--output", default="pagerduty_services_deletion", help="Custom CSV output filename prefix for the deletion report"
     )
 
     parser.add_argument(

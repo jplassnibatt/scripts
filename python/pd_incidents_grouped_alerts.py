@@ -338,7 +338,7 @@ def export_to_csv(
     total: int,
     time_zone: Optional[str] = None,
     prefix: Optional[str] = None,
-    default_prefix: str = "pagerduty_incident_grouped_alerts",
+    default_prefix: str = "pagerduty_incidents_grouped_alerts",
 ) -> str:
     """Exports data to a safely versioned timestamped CSV file."""
     resolved_prefix = prefix or os.environ.get("OUTPUT_FILE") or default_prefix
@@ -441,7 +441,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-o",
         "--output",
-        default="pagerduty_incident_grouped_alerts",
+        default="pagerduty_incidents_grouped_alerts",
         help="Custom CSV filename prefix",
     )
     parser.add_argument(

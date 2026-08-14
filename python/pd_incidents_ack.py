@@ -160,7 +160,7 @@ class PagerDutyAcknowledgeExporter:
 def export_to_csv(
     data: List[Dict[str, Any]],
     prefix: Optional[str] = None,
-    default_prefix: str = "pagerduty_incident_ack",
+    default_prefix: str = "pagerduty_incidents_ack",
 ) -> str:
     """Exports structured log data to a safely versioned timestamped CSV file."""
     resolved_prefix = prefix or os.environ.get("OUTPUT_FILE") or default_prefix
@@ -235,7 +235,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-o",
         "--output",
-        default="pagerduty_incident_ack",
+        default="pagerduty_incidents_ack",
         help="Custom CSV filename prefix",
     )
     parser.add_argument(

@@ -361,7 +361,7 @@ def export_to_csv(
     until: str,
     time_zone: Optional[str] = None,
     prefix: Optional[str] = None,
-    default_prefix: str = "pagerduty_mttr_analysis"
+    default_prefix: str = "pagerduty_services_mttr"
 ) -> str:
     """Exports structured MTTR statistics to a safely versioned timestamped CSV."""
     resolved_prefix = prefix or os.environ.get("OUTPUT_FILE") or default_prefix
