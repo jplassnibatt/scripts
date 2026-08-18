@@ -196,6 +196,7 @@ class PagerDutyAPI:
                 details = body.get("details") or {}
                 incident = alert.get("incident") or {}
                 service = alert.get("service") or {}
+                integration = alert.get("integration") or {}
 
                 alerts.append(
                     {
@@ -211,6 +212,7 @@ class PagerDutyAPI:
                         "incident_summary": incident.get("summary"),
                         "service_id": service.get("id"),
                         "service_name": service.get("summary"),
+                        "integration": integration.get("summary"),
                         "source_origin": cef_details.get("source_origin"),
                         "source_component": cef_details.get("source_component"),
                         "event_class": cef_details.get("event_class"),
@@ -283,6 +285,7 @@ def export_to_csv(
         "Incident Summary",
         "Service ID",
         "Service Name",
+        "Integration",
         "Source Origin",
         "Source Component",
         "Event Class",
@@ -310,6 +313,7 @@ def export_to_csv(
                     "Incident Summary": alert.get("incident_summary"),
                     "Service ID": alert.get("service_id"),
                     "Service Name": alert.get("service_name"),
+                    "Integration": alert.get("integration"),
                     "Source Origin": alert.get("source_origin"),
                     "Source Component": alert.get("source_component"),
                     "Event Class": alert.get("event_class"),
