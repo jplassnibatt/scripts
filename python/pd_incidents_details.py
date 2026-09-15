@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Dict, List, Optional
 import requests
 
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 
 logging.basicConfig(
     level=logging.WARNING,
@@ -84,10 +84,7 @@ def apply_default_time_if_missing(date_str: str) -> str:
 
 
 class PagerDutyAPI:
-    """PagerDuty REST API v2 client with built-in rate-limiting and session management.
-
-    Handles default rate limits of $Rate = 250\text{ req/min}$ with client-side throttling.
-    """
+    """PagerDuty REST API v2 client with built-in rate-limiting and session management."""
 
     def __init__(self, api_token: str, rate_limit: int = 8):
         if not api_token or api_token.strip() == "":
@@ -108,7 +105,7 @@ class PagerDutyAPI:
         )
 
     def _rate_limit(self) -> None:
-        """Enforces client-side rate limiting ($Rate = 8\text{ req/s}$)."""
+        """Enforces client-side rate limiting."""
         elapsed = time.time() - self.last_request
         if elapsed < self.min_interval:
             time.sleep(self.min_interval - elapsed)
@@ -172,8 +169,7 @@ class PagerDutyAPI:
     def get_incidents(
         self, since: Optional[str] = None, until: Optional[str] = None, time_zone: Optional[str] = None
     ) -> List[Dict]:
-        """Fetches all incidents within the specified date range, natively evaluated by PagerDuty's
-        time_zone handler when provided; otherwise the account's default time zone governs interpretation."""
+        """Fetches all incidents within the specified date range."""
         incidents = []
         offset = 0
         limit = 100
@@ -211,11 +207,27 @@ class PagerDutyAPI:
 
         return incidents
 
+    def get_incident_custom_fields(self, incident_id: str) -> Dict[str, str]:
+        """Fetches custom field values for a specific incident from GET /incidents/{id}/custom_fields/values."""
+        url = f"{self.base_url}/incidents/{incident_id}/custom_fields/values"
+        response = self._request(url)
+        if not response:
+            return {}
+
+        data = response.json()
+        custom_fields = {}
+        for item in data.get("custom_fields", []):
+            field_name = item.get("display_name") or item.get("name")
+            value = item.get("value")
+            if isinstance(value, list):
+                value = ", ".join(map(str, value))
+            custom_fields[field_name] = str(value) if value is not None else ""
+
+        return custom_fields
+
 
 def format_datetime(dt_str: Optional[str]) -> str:
-    """Reformats an ISO 8601 timestamp for display: 'T' becomes a space, and a missing
-    offset (naive or 'Z') is made explicit as '+00:00' (UTC). The offset, if any, is
-    taken as-is from the API response with no conversion applied."""
+    """Reformats an ISO 8601 timestamp for display."""
     if not dt_str:
         return ""
     match = re.match(
@@ -234,11 +246,14 @@ def format_datetime(dt_str: Optional[str]) -> str:
     return f"{date_part} {time_part} {offset}"
 
 
-def extract_incident_data(incidents: List[Dict]) -> List[Dict]:
-    """Extracts and flattens incident records directly from natively localized API responses."""
+def extract_incident_data(incidents: List[Dict], api: Optional[PagerDutyAPI] = None) -> List[Dict]:
+    """Extracts and flattens incident records, including Custom Fields retrieved per incident."""
     results = []
 
-    for incident in incidents:
+    for idx, incident in enumerate(incidents, 1):
+        incident_id = incident.get("id", "N/A")
+        logger.info(f"Extracting custom fields [{idx}/{len(incidents)}]: {incident_id}")
+
         trigger_summary = "N/A"
         if incident.get("first_trigger_log_entry"):
             trigger_summary = incident["first_trigger_log_entry"].get("summary", "N/A")
@@ -248,9 +263,13 @@ def extract_incident_data(incidents: List[Dict]) -> List[Dict]:
             format_datetime(created_at_raw) if created_at_raw != "N/A" else "N/A"
         )
 
+        custom_fields = {}
+        if api and incident_id != "N/A":
+            custom_fields = api.get_incident_custom_fields(incident_id)
+
         results.append(
             {
-                "incident_id": incident.get("id", "N/A"),
+                "incident_id": incident_id,
                 "incident_number": incident.get("incident_number", "N/A"),
                 "incident_title": incident.get("title", "N/A"),
                 "status": incident.get("status", "N/A"),
@@ -258,6 +277,7 @@ def extract_incident_data(incidents: List[Dict]) -> List[Dict]:
                 "service": incident.get("service", {}).get("summary", "N/A"),
                 "created_at": created_at_local,
                 "trigger_summary": trigger_summary,
+                "custom_fields": custom_fields,
             }
         )
 
@@ -269,7 +289,7 @@ def export_to_csv(
     prefix: Optional[str] = None,
     default_prefix: str = "pagerduty_incidents",
 ) -> str:
-    """Exports dataset to a safely versioned, timestamped CSV file."""
+    """Exports dataset to a safely versioned, timestamped CSV file with dynamic Custom Field columns."""
     resolved_prefix = prefix or os.environ.get("OUTPUT_FILE") or default_prefix
 
     if resolved_prefix.endswith(".csv"):
@@ -278,7 +298,7 @@ def export_to_csv(
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     filename = f"{resolved_prefix}_{timestamp}.csv"
 
-    fieldnames = [
+    standard_headers = [
         "Incident ID",
         "Incident Number",
         "Incident Title",
@@ -289,11 +309,18 @@ def export_to_csv(
         "Trigger Summary",
     ]
 
+    # Dynamically extract all unique Custom Field names across all retrieved incidents
+    cf_keys = sorted({key for row in data for key in row.get("custom_fields", {}).keys()})
+    cf_headers = [f"CF: {key}" for key in cf_keys]
+
+    fieldnames = standard_headers + cf_headers
+
     with open(filename, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         if data:
             for row in data:
+                cf_dict = row.get("custom_fields", {})
                 mapped_row = {
                     "Incident ID": row.get("incident_id"),
                     "Incident Number": row.get("incident_number"),
@@ -304,6 +331,9 @@ def export_to_csv(
                     "Created At": row.get("created_at"),
                     "Trigger Summary": row.get("trigger_summary"),
                 }
+                for key in cf_keys:
+                    mapped_row[f"CF: {key}"] = cf_dict.get(key, "")
+
                 writer.writerow(mapped_row)
 
     logger.info(f"✓ CSV report saved: '{filename}'")
@@ -348,9 +378,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--timezone",
         default=None,
         metavar="TZ",
-        help="Custom timezone IANA name (e.g., 'America/Santiago', 'UTC'). If omitted, dates are "
-        "interpreted using the account's default time zone and output timestamps are rendered "
-        "in UTC without an offset",
+        help="Custom timezone IANA name (e.g., 'America/Santiago', 'UTC').",
     )
     parser.add_argument(
         "-o", "--output", default="pagerduty_incidents", help="Custom CSV filename prefix"
@@ -401,7 +429,7 @@ def main() -> None:
             delta = parse_lookback_span(args.lookback)
             since_local = now_local - delta
             until_local = now_local
-            
+
             since = since_local.strftime("%Y-%m-%dT%H:%M:%S")
             until = until_local.strftime("%Y-%m-%dT%H:%M:%S")
         except ValueError as e:
@@ -436,7 +464,7 @@ def main() -> None:
             logger.warning("No incidents matched the target date range.")
             sys.exit(0)
 
-        results = extract_incident_data(incidents)
+        results = extract_incident_data(incidents, api=api)
         output_filename = export_to_csv(results, prefix=args.output)
 
         elapsed = time.time() - start_time
