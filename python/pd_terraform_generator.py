@@ -8,7 +8,7 @@ Installation:
 
 Usage:
     ./pd_terraform_generator.py --import
-    ./pd_terraform_generator.py --execute_plan
+    ./pd_terraform_generator.py --generate_config
     ./pd_terraform_generator.py --replace_refs
     ./pd_terraform_generator.py --structure
     ./pd_terraform_generator.py --cleanup
@@ -41,7 +41,7 @@ import requests
 # CONFIGURATION & CONSTANTS
 # ============================================================================
 
-__version__ = "2.2.2"
+__version__ = "2.2.3"
 SCRIPT_NAME = os.path.basename(sys.argv[0])
 
 BASE_URL = "https://api.pagerduty.com"
@@ -687,6 +687,9 @@ RESOURCE_CONFIGS = {
     "pagerduty_schedule": ResourceConfig(
         api_endpoint="/schedules", resource_key="schedules", terraform_type="pagerduty_schedule", naming_field="id", output_file="schedules"
     ),
+    "pagerduty_schedulev2": ResourceConfig(
+        api_endpoint="/v3/schedules", resource_key="schedules", terraform_type="pagerduty_schedulev2", naming_field="id", output_file="schedules_v2"
+    ),
     "pagerduty_business_service": ResourceConfig(
         api_endpoint="/business_services", resource_key="business_services", terraform_type="pagerduty_business_service", naming_field="id", output_file="business_services"
     ),
@@ -1129,7 +1132,7 @@ def run_import() -> None:
     total_resources = sum(len(r) for r in stored_resources.values())
 
     logger.info("\n" + "=" * 80)
-    logger.info("SUMMARY")
+    logger.info("IMPORT COMPLETE")
     logger.info("=" * 80)
     logger.info(f"Total resources found: {total_resources}")
     logger.info(f"Total execution time: {elapsed_time:.2f} seconds")
@@ -1138,7 +1141,15 @@ def run_import() -> None:
     if api_client.cache.hits > 0:
         logger.info(f"API requests saved: {api_client.cache.hit_rate:.1f}%")
     logger.info("=" * 80)
-
+    logger.info("\nIf successful, next steps:")
+    logger.info("1. Review the generated to_import_*.tf files")
+    logger.info(f"2. Run: {SCRIPT_NAME} --generate_config or -g")
+    logger.info(f"3. Run: {SCRIPT_NAME} --replace_refs or -r (optional)")
+    logger.info(f"4. Run: {SCRIPT_NAME} --structure or -s (optional)")
+    logger.info("5. Run: terraform plan (to verify changes)")
+    logger.info("6. Run: terraform apply (to apply changes)")
+    logger.info(f"7. Run: {SCRIPT_NAME} --cleanup or -c (recommended)")
+    logger.info("=" * 80)
 
 def parse_import_file(filename: str) -> List[str]:
     targets = []
@@ -1152,10 +1163,10 @@ def parse_import_file(filename: str) -> List[str]:
     return targets
 
 
-def run_execute_plan() -> None:
+def run_generate_config() -> None:
     logger.info("=" * 80)
     logger.info(f"CSE - PagerDuty Terraform Import Generator v{__version__}")
-    logger.info("MODE: Execute Plan - Running terraform plan commands")
+    logger.info("MODE: Generate Config - Generate Terraform configuration files from imports")
     logger.info("=" * 80)
 
     import_files = glob.glob("to_import_*.tf")
@@ -1165,11 +1176,17 @@ def run_execute_plan() -> None:
 
     for import_file in sorted(import_files):
         output_file = import_file.replace("to_import_", "").replace(".tf", "")
+        output_filename = f"imported_{output_file}.tf"
+
+        # NEW LOGIC: Check if the generated config already exists to prevent Terraform failure
+        if os.path.exists(output_filename):
+            logger.info(f"  ℹ Skipping {import_file}: Target {output_filename} already exists.")
+            continue
+
         targets = parse_import_file(import_file)
         if not targets:
             continue
 
-        output_filename = f"imported_{output_file}.tf"
         cmd = ["terraform", "plan", f"-generate-config-out={output_filename}"]
         for target in targets:
             cmd.extend(["-target", target])
@@ -1183,13 +1200,35 @@ def run_execute_plan() -> None:
         except Exception as e:
             logger.error(f"  ✗ Error: {e}")
 
+    # Count generated files
+    generated_files = len(glob.glob("imported_*.tf"))
+    
+    logger.info("\n" + "=" * 80)
+    logger.info("FILES GENERATION COMPLETE")
+    logger.info("=" * 80)
+    logger.info(f"Files processed: {len(import_files)}")
+    logger.info(f"Files generated: {generated_files}")
+    # logger.info(f"Total resources processed: {total_resources} (owner user was not processed)")
+    # logger.info(f"Successful: {successful_files}")
+    # if failed_files > 0:
+    #     logger.info(f"⚠️  Failed: {failed_files}")
+    #     logger.info("   (Check logs above for details)")
+    logger.info("=" * 80)
+    logger.info("\nIf successful, next steps:")
+    logger.info("1. Review the generated imported_*.tf files")
+    logger.info(f"2. Run: {SCRIPT_NAME} --replace_refs or -r (optional)")
+    logger.info(f"3. Run: {SCRIPT_NAME} --structure or -s (optional)")
+    logger.info("4. Run: terraform plan (to verify changes)")
+    logger.info("5. Run: terraform apply (to apply changes)")
+    logger.info(f"6. Run: {SCRIPT_NAME} --cleanup or -c (recommended)")
+    logger.info("=" * 80)
 
 def build_resource_id_map(imported_files: List[str]) -> Dict[str, Dict[str, str]]:
     """Build a map of resource IDs to their Terraform references."""
     resource_map = {}
     tracked_types = [
         "pagerduty_user", "pagerduty_team", "pagerduty_service",
-        "pagerduty_escalation_policy", "pagerduty_schedule",
+        "pagerduty_escalation_policy", "pagerduty_schedule", "pagerduty_schedulev2",
         "pagerduty_business_service", "pagerduty_event_orchestration",
         "pagerduty_automation_actions_runner", "pagerduty_automation_actions_action",
         "pagerduty_incident_workflow", "pagerduty_tag",
@@ -1281,7 +1320,7 @@ def run_replace_refs() -> None:
 
     if not imported_files:
         logger.error("\n❌ ERROR: No imported_*.tf files found!")
-        logger.info(f"Please run the execute plan mode first: {SCRIPT_NAME} -e")
+        logger.info(f"Please run the generate config mode first: {SCRIPT_NAME} -e")
         return
 
     logger.info(f"\nFound {len(imported_files)} imported files")
@@ -1309,7 +1348,13 @@ def run_replace_refs() -> None:
     logger.info("\n" + "=" * 80)
     logger.info(f"Total replacements made: {total_replacements}")
     logger.info("=" * 80)
-
+    logger.info("\nIf successful, next steps:")
+    logger.info("1. Review the modified imported_*.tf files")
+    logger.info(f"2. Run: {SCRIPT_NAME} --structure or -s (optional)")
+    logger.info("3. Run: terraform plan (to verify changes)")
+    logger.info("4. Run: terraform apply (to apply changes)")
+    logger.info(f"5. Run: {SCRIPT_NAME} --cleanup or -c (recommended)")
+    logger.info("=" * 80)
 
 def run_structure() -> None:
     logger.info("=" * 80)
@@ -1321,7 +1366,7 @@ def run_structure() -> None:
 
     if not imported_files:
         logger.info("\n❌ ERROR: No imported_*.tf files found!")
-        logger.info(f"Please run the execute plan mode first: {SCRIPT_NAME} -e")
+        logger.info(f"Please run the generate config mode first: {SCRIPT_NAME} -e")
         return
 
     logger.info(f"\nFound {len(imported_files)} imported files")
@@ -1342,7 +1387,7 @@ def run_structure() -> None:
             "imported_service_custom_fields.tf",
             "imported_service_custom_field_values.tf",
         ],
-        "schedules.tf": ["imported_schedules.tf"],
+        "schedules.tf": ["imported_schedules.tf", "imported_schedules_v2.tf"],
         "escalation_policies.tf": ["imported_escalation_policies.tf"],
         "event_orchestrations.tf": [
             "imported_event_orchestrations.tf",
@@ -1482,6 +1527,13 @@ def run_structure() -> None:
     logger.info(f"Files merged: {files_merged}")
     if files_renamed > 0:
         logger.info(f"Files renamed: {files_renamed}")
+        logger.info(f"Total operations: {files_merged + files_renamed}")
+    logger.info("=" * 80)
+    logger.info("\nIf successful, next steps:")
+    logger.info("1. Review the structured .tf files")
+    logger.info("2. Run: terraform plan (to verify, should be no changes)")
+    logger.info("3. Run: terraform apply (to apply changes)")
+    logger.info(f"4. Run: {SCRIPT_NAME} --cleanup or -c (recommended)")
     logger.info("=" * 80)
 
 
@@ -1511,7 +1563,7 @@ def run_cleanup() -> None:
             logger.info(f"  - {import_file}")
 
     try:
-        response = input("\nAre you sure you want to delete these files? (yes/no): ").strip().lower()
+        response = input("\nAre you sure you want to delete these files?, you MUST have run 'terraform apply' first (yes/no): ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         logger.info("\n\nOperation cancelled.")
         return
@@ -1544,10 +1596,10 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=WideHelpFormatter,
     )
     parser.add_argument("-i", "--import", dest="import_mode", action="store_true", help="Fetch from API and generate import files")
-    parser.add_argument("-e", "--execute_plan", dest="execute_plan", action="store_true", help="Execute terraform plan commands")
+    parser.add_argument("-g", "--generate_config", dest="generate_config", action="store_true", help="Generate Terraform configuration files from imports")
     parser.add_argument("-r", "--replace_refs", dest="replace_refs", action="store_true", help="Replace hardcoded IDs with Terraform references")
     parser.add_argument("-s", "--structure", dest="structure", action="store_true", help="Structure imported files into logical groups")
-    parser.add_argument("-c", "--cleanup", dest="cleanup", action="store_true", help="Remove temporary backup and import files")
+    parser.add_argument("-c", "--cleanup", dest="cleanup", action="store_true", help="Remove temporary backup and import files, DO NOT RUN THIS BEFORE TERRAFORM APPLY")
     parser.add_argument(
         "--debug",
         action="store_true",
@@ -1568,8 +1620,8 @@ def main() -> None:
 
     if args.import_mode:
         run_import()
-    elif args.execute_plan:
-        run_execute_plan()
+    elif args.generate_config:
+        run_generate_config()
     elif args.replace_refs:
         run_replace_refs()
     elif args.structure:
