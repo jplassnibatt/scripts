@@ -975,7 +975,7 @@ def display_resource_menu() -> List[str]:
     print("\n" + "-" * 80)
 
     while True:
-        selection = input("\nEnter your selection (or press Enter for all): ").strip()
+        selection = input("\nEnter your selection (or press Enter for all), 'q' or 'Q' to exit: ").strip()
         if selection.lower() == "q":
             print("Exiting...")
             sys.exit(0)
