@@ -1195,6 +1195,11 @@ def run_generate_config() -> None:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             if result.returncode == 0:
                 logger.info(f"  ✓ Successfully generated {output_filename}")
+                
+                # Check if this is the users import to print the specific warning
+                if output_file == "users":
+                    total_resources = len(targets)
+                    logger.info(f"  ℹ Total resources processed: {total_resources} (owner user was not processed)")
             else:
                 logger.error(f"  ✗ Error running terraform plan: {result.stderr}")
         except Exception as e:
@@ -1208,11 +1213,6 @@ def run_generate_config() -> None:
     logger.info("=" * 80)
     logger.info(f"Files processed: {len(import_files)}")
     logger.info(f"Files generated: {generated_files}")
-    # logger.info(f"Total resources processed: {total_resources} (owner user was not processed)")
-    # logger.info(f"Successful: {successful_files}")
-    # if failed_files > 0:
-    #     logger.info(f"⚠️  Failed: {failed_files}")
-    #     logger.info("   (Check logs above for details)")
     logger.info("=" * 80)
     logger.info("\nIf successful, next steps:")
     logger.info("1. Review the generated imported_*.tf files")
