@@ -15,9 +15,33 @@ Usage:
 
 Requisites:
     - Python 3.8+
-    - requests library: pip3 install requests
+        - requests library: pip3 install requests
     - Terraform
-    - Pagerduty provider >=3.31.4
+        - Pagerduty provider >=3.36.0
+
+TF files examples:
+    - provider.tf:
+terraform {
+  required_providers {
+    pagerduty = {
+      source  = "PagerDuty/pagerduty"
+      version = ">=3.36.0"
+    }
+  }
+}
+
+provider "pagerduty" {
+  token = var.pd_token
+}
+
+    - variables.tf:
+variable "pd_token" {
+  description = "PD API token"
+}
+
+    - terraform.tfvars
+pd_token = "<PAGERDUTY_API_TOKEN>"
+
 """
 
 import argparse
