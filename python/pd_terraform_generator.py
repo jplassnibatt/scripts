@@ -1191,6 +1191,9 @@ def run_generate_config() -> None:
         for target in targets:
             cmd.extend(["-target", target])
 
+        # NEW: Log the exact command being executed when --debug is selected
+        logger.debug(f"  [DEBUG] Executing command: {' '.join(cmd)}")
+
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             if result.returncode == 0:
